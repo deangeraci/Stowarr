@@ -1,91 +1,98 @@
-# Media Optimizer
+# Stowarr
 
-Automated archival-quality optimization for self-hosted media libraries.
+**Watch your precious cargo. Stow it smarter.**
 
-Initial target workflow:
+Automatically optimize watched media to reclaim storage without sacrificing quality.
 
-Jellyfin watched state
-  -> grace period
-  -> inspect current Sonarr/Radarr media
-  -> search candidate releases
-  -> compare quality/size/codec
-  -> estimate storage savings
-  -> approval or automatic replacement
-  -> verify successful import
-  -> preserve original on failure
-  -> report actual savings
+> **Status: v0.1.0-alpha / read-only**
+>
+> Stowarr currently observes media state, evaluates lifecycle eligibility,
+> and scores replacement candidates. Downloads, imports, replacements,
+> and deletions are not yet enabled.
 
-## Safety invariant
+## What is Stowarr?
 
-The existing media file must never be deleted before the replacement has
-successfully downloaded, imported, and been verified.
+Stowarr is a lifecycle-aware storage optimizer for self-hosted media libraries
+using Jellyfin, Sonarr, and Radarr.
 
-## v0.1
+The intended workflow is:
 
-READ-ONLY ONLY.
+1. Detect when media has been watched.
+2. Wait a configurable grace period.
+3. Inspect the existing file and storage cost.
+4. Evaluate smaller acceptable replacements.
+5. Estimate potential storage savings.
+6. Request approval.
+7. Acquire the replacement through Sonarr or Radarr.
+8. Verify the successful import.
+9. Only then allow the original media to be retired.
+10. Report actual storage saved.
 
-- Jellyfin integration
-- Sonarr integration
-- Radarr integration
-- library inventory
-- watched-state analysis
-- candidate scoring
-- estimated savings
-- no downloads
-- no deletion
-- no media modification
-## Safety Architecture
+Only the read-only observation and policy layers are implemented today.
 
-Media Optimizer is designed around strict separation between observation,
-eligibility, approval, acquisition, and replacement.
+## Safety First
 
-Current safety rules:
+**Existing media must never be removed before its replacement has been
+successfully downloaded, imported, and verified.**
+
+Current safety rules include:
 
 - Jellyfin `Played=true` determines watched state.
-- A completed item without trustworthy completion timing is blocked.
-- Historical incomplete playback evidence is never converted into an automatic completion date.
+- Missing or uncertain completion history fails safe.
 - Default watched delay is 30 days.
-- Replacement candidates must be at least 1080p.
+- Minimum replacement resolution is 1080p.
 - Remux, raw-HD, BR-DISK, CAM, and telesync candidates are rejected.
-- HEVC/x265/H.265 is preferred.
-- A candidate must save at least 5 GiB OR 40 percent.
+- HEVC / x265 / H.265 is preferred.
+- Candidates must save at least 5 GiB OR 40%.
 - Source-service synchronization is read-only.
 - Download, import, and delete capabilities remain disabled.
-- Original media must never be removed before a replacement has been successfully imported and verified.
-- Initial production workflow requires explicit user approval.
+- Initial write-enabled workflows will require explicit approval.
 
-## Current Development State
+## Current Features
 
-Implemented:
-
-- Dockerized application
-- unprivileged runtime
-- Docker secret/build-context hygiene
-- Jellyfin connectivity
-- Sonarr connectivity
-- Radarr connectivity
 - Jellyfin watched-state inventory
-- TV season completeness
-- movie inventory
-- persistent SQLite state
-- stable identity keys
-- schema versioning
-- audit-log schema
-- lifecycle safety engine
-- 30-day eligibility rules
-- replacement candidate policy
-- unit tests
-- one-command validation
-- SQLite-safe backup utility
+- Sonarr season correlation
+- Radarr movie inventory
+- TV season completeness detection
+- Persistent SQLite state
+- Stable identity keys
+- Schema versioning
+- Audit-log foundation
+- Lifecycle safety engine
+- 30-day eligibility policy
+- Replacement candidate scoring
+- Storage-savings calculations
+- Unprivileged Docker runtime
+- Secret-safe configuration
+- SQLite-safe backups
+- Automated validation and unit tests
 
-Not yet enabled:
+## Not Yet Enabled
 
-- release searching
-- downloading
-- importing
-- deleting/replacing media
+- Release searching
+- Downloads
+- Replacement imports
+- Media deletion
 - Telegram approval
-- automatic optimization
+- Automatic optimization
 
-Those capabilities must remain disabled until the read-only lifecycle and
-candidate-selection pipeline has been validated.
+## Validation
+
+Run:
+
+    ./scripts/validate.sh
+
+All tests and safety checks must pass before changes are committed.
+
+## Security
+
+Never commit API keys, passwords, tokens, or other credentials.
+
+Runtime credentials are supplied through environment variables and local
+configuration files excluded from Git.
+
+See `SECURITY.md` for vulnerability reporting guidance.
+
+## License
+
+MIT
