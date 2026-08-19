@@ -1,0 +1,25 @@
+services:
+  media-optimizer:
+    build: .
+    container_name: media-optimizer
+    user: "${PUID:-1000}:${PGID:-10}"
+
+    env_file:
+      - .env
+
+    environment:
+      - MEDIA_OPTIMIZER_CONFIG=/app/config/config.yaml
+
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+      - ./logs:/app/logs
+
+    networks:
+      - arr-stack_default
+
+    restart: "no"
+
+networks:
+  arr-stack_default:
+    external: true

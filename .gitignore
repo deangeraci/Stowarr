@@ -1,0 +1,26 @@
+.env
+*.db
+*.sqlite
+*.sqlite3
+logs/*
+data/*
+config/config.yaml
+__pycache__/
+*.pyc
+
+!logs/.gitkeep
+!data/.gitkeep
+# Local development / backups
+backups/
+README.md.before-*
+*.bak
+*.backup
+# Editor / OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+# Test/cache output
+.pytest_cache/
+.coverage
+htmlcov/

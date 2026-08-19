@@ -1,0 +1,49 @@
+timezone: America/New_York
+
+mode: dry-run
+
+scan:
+  interval_hours: 12
+
+lifecycle:
+  watched_delay_days: 30
+
+optimization:
+  minimum_resolution: 1080
+  minimum_savings_gb: 5
+  minimum_savings_percent: 40
+
+  preferred_codecs:
+    - x265
+    - hevc
+    - h265
+
+  reject:
+    - remux
+    - raw-hd
+    - br-disk
+    - cam
+    - telesync
+
+tv:
+  optimize_by_season: true
+  require_complete_season: true
+
+safety:
+  allow_download: false
+  allow_import: false
+  allow_delete: false
+  verify_before_replace: true
+
+services:
+  jellyfin:
+    url: http://jellyfin:8096
+    api_key_env: JELLYFIN_API_KEY
+
+  sonarr:
+    url: http://sonarr:8989
+    api_key_env: SONARR_API_KEY
+
+  radarr:
+    url: http://radarr:7878
+    api_key_env: RADARR_API_KEY
