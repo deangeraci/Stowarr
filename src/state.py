@@ -4,7 +4,7 @@ import sqlite3
 from pathlib import Path
 
 
-CURRENT_SCHEMA_VERSION = 2
+CURRENT_SCHEMA_VERSION = 3
 
 
 SCHEMA = """
@@ -33,6 +33,27 @@ CREATE TABLE IF NOT EXISTS media_state (
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS media_user_state (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+
+    user_id TEXT NOT NULL,
+    item_id TEXT NOT NULL,
+
+    item_type TEXT,
+    item_name TEXT,
+
+    watched_state TEXT NOT NULL DEFAULT 'unknown',
+
+    completion_time TEXT,
+    completion_confidence TEXT NOT NULL DEFAULT 'unknown',
+    eligible_at TEXT,
+
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    UNIQUE(user_id, item_id)
+);
+
 CREATE TABLE IF NOT EXISTS schema_metadata (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -53,6 +74,12 @@ ON media_state(decision);
 
 CREATE INDEX IF NOT EXISTS idx_media_state_eligible
 ON media_state(eligible_at);
+
+CREATE INDEX IF NOT EXISTS idx_media_user_state_eligible
+ON media_user_state(eligible_at);
+
+CREATE INDEX IF NOT EXISTS idx_media_user_state_user
+ON media_user_state(user_id);
 
 CREATE INDEX IF NOT EXISTS idx_audit_log_created
 ON audit_log(created_at);
