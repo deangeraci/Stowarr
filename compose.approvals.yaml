@@ -1,0 +1,18 @@
+# Optional private UI; run alongside compose.yaml.
+services:
+  stowarr-approvals:
+    build: .
+    user: "${PUID:-1000}:${PGID:-10}"
+    entrypoint: ["python", "/app/src/approval_web.py"]
+    env_file:
+      - .env.approvals
+    volumes:
+      - ./data:/app/data
+    ports:
+      - "${STOWARR_APPROVAL_BIND:-127.0.0.1}:8787:8787"
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    pids_limit: 64

@@ -5,3 +5,5 @@ config/config.yaml
 .git/
 __pycache__/
 *.pyc
+
+.env.approvals

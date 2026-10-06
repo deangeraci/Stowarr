@@ -31,6 +31,8 @@ echo
 echo "========== SECRET HYGIENE =========="
 
 grep -qxF '.env' .dockerignore
+grep -qxF '.env.approvals' .dockerignore
+grep -qxF '.env.approvals' .gitignore
 grep -qxF 'config/config.yaml' .dockerignore
 grep -qxF 'data/' .dockerignore
 
