@@ -19,7 +19,7 @@ def main() -> None:
     with open(CONFIG, "r", encoding="utf-8") as f:
         config = yaml.safe_load(f)
 
-    timezone_name = config["timezone"]
+    timezone_name = config.get("playback_timezone_history", config["timezone"])
     service = config["services"]["jellyfin"]
 
     jellyfin = ServiceClient(
