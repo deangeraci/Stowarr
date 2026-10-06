@@ -11,6 +11,7 @@ from completion_selector import (
     select_completion,
 )
 from completion_state import persist_completion_state
+from completion_config import configured_grace_days
 from playback_history import get_recent_playback_events
 from state import initialize_database
 
@@ -26,9 +27,7 @@ def main() -> None:
         config = yaml.safe_load(f)
 
     timezone_name = config.get("playback_timezone_history", config["timezone"])
-    grace_days = int(
-        config.get("watched_delay_days", 30)
-    )
+    grace_days = configured_grace_days(config)
 
     service = config["services"]["jellyfin"]
 
