@@ -28,7 +28,9 @@ The intended workflow is:
 9. Only then allow the original media to be retired.
 10. Report actual storage saved.
 
-Only the read-only observation and policy layers are implemented today.
+The observation and policy layers remain read-only toward media services.
+An optional private approval queue records staging decisions locally; execution
+is still disabled. See [Staging approvals](docs/approvals.md) for setup.
 
 ## Safety First
 
@@ -47,6 +49,7 @@ Current safety rules include:
 - Source-service synchronization is read-only.
 - Download, import, and delete capabilities remain disabled.
 - Initial write-enabled workflows will require explicit approval.
+- Optional staging approvals pin the exact source/release and expire after 72 hours.
 
 ## Current Features
 
@@ -57,6 +60,8 @@ Current safety rules include:
 - Persistent SQLite state
 - Stable identity keys
 - Schema versioning
+- Private approval UI with Approve staging / Reject buttons
+- Durable release-specific decisions and email/webhook link notifications
 - Audit-log foundation
 - Lifecycle safety engine
 - 30-day eligibility policy

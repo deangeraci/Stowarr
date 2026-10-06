@@ -35,6 +35,15 @@ def local_wall_clock_to_utc(
     if parsed.tzinfo is not None:
         return parsed.astimezone(timezone.utc)
 
+    if isinstance(timezone_name, dict):
+        day = parsed.date().isoformat()
+        if day < timezone_name["uncertain_from"]:
+            timezone_name = timezone_name["before"]
+        elif day >= timezone_name["uncertain_until"]:
+            timezone_name = timezone_name["after"]
+        else:
+            raise ValueError("playback occurred during uncertain timezone migration")
+
     return parsed.replace(
         tzinfo=ZoneInfo(timezone_name)
     ).astimezone(timezone.utc)
@@ -79,10 +88,13 @@ def assess_completion(
             f"playback session covered only {ratio:.1%} of runtime",
         )
 
-    session_start_utc = local_wall_clock_to_utc(
-        session_started_at,
-        timezone_name,
-    )
+    try:
+        session_start_utc = local_wall_clock_to_utc(
+            session_started_at,
+            timezone_name,
+        )
+    except ValueError as exc:
+        return CompletionEvidence(None, "partial", str(exc))
 
     completion_time = session_start_utc + timedelta(
         seconds=session_duration_seconds
