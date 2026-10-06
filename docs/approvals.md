@@ -109,3 +109,27 @@ calls an executor and preserves existing global safety gates.
 Back up approvals with SQLite's backup API alongside completion state. Changing
 the password requires recreating the service. All request mutations require
 an authenticated POST and a session CSRF token; no GET endpoint changes state.
+
+## Queue a live movie candidate
+
+`movie_approvals.py` queues one proposal for an explicitly selected Radarr movie
+and Jellyfin user. It reads trusted completion state, recomputes the configured
+grace period, confirms live Jellyfin Played status, matches provider IDs, then
+searches Radarr and pins the current imported file ID/size and release hash.
+Only existing-cutoff rejections are tolerated. A matching release needs reported
+seeders, 1080p HEVC, an infohash/indexer ID and acceptable base savings.
+
+```sh
+docker compose -f compose.yaml -f compose.approvals.yaml run --rm -T \
+  --entrypoint python media-optimizer /app/src/movie_approvals.py \
+  --movie-id RADARR_ID --user-id JELLYFIN_USER_ID
+```
+
+The first phase uses an explicit operator-selected movie; it does not schedule
+whole-library scans or execute downloads. This is one user's staging eligibility,
+not household replacement clearance. Default candidate package size is 4–8 GiB;
+set `approvals.minimum_candidate_gib` and `approvals.maximum_candidate_gib` in
+local configuration to customize it. The highest reported-seeder qualifying
+release is proposed; all release metadata still needs post-download verification.
+`--notify` uses the same optional environment-based notification adapters; configure
+those variables in the command's service environment before using it.
