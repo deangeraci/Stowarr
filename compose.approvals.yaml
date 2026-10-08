@@ -16,3 +16,22 @@ services:
     security_opt: [no-new-privileges:true]
     mem_limit: 128m
     pids_limit: 64
+
+  stowarr-staging:
+    build: .
+    user: "${PUID:-1000}:${PGID:-10}"
+    entrypoint: ["python", "/app/src/movie_staging_executor.py"]
+    env_file:
+      - .env
+      - .env.approvals
+    volumes:
+      - ./config:/app/config:ro
+      - ./data:/app/data
+    networks:
+      - arr-stack_default
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    pids_limit: 64

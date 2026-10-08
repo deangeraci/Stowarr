@@ -1,8 +1,9 @@
 # Stowarr staging approvals
 
 Optional private UI with Approve staging / Reject buttons. It stores decisions
-in `data/approvals.sqlite3`, separate from completion history. No download,
-import, replacement or deletion executor is enabled by this feature.
+in `data/approvals.sqlite3`, separate from completion history. The optional
+staging service can submit an approved exact release to Radarr; importing,
+replacement, and deletion remain separate workflows.
 
 ## Install
 
@@ -103,8 +104,9 @@ then atomically call `store.consume(request_id, current_snapshot)` before
 staging. The hash pins source file ID/size, release ID/title/size, indexer and
 media identity. Any changed field invalidates authorization. `consume` is an
 at-most-once claim, not download success. Reconcile errors before a new request.
-Import/replacement needs a separate verified approval boundary. This UI never
-calls an executor and preserves existing global safety gates.
+The optional staging service rechecks live completion, Played status, the current
+source file and exact release availability before sending an approved request to
+Radarr. It never imports, replaces, or deletes library media.
 
 Back up approvals with SQLite's backup API alongside completion state. Changing
 the password requires recreating the service. All request mutations require
@@ -133,3 +135,10 @@ local configuration to customize it. The highest reported-seeder qualifying
 release is proposed; all release metadata still needs post-download verification.
 `--notify` uses the same optional environment-based notification adapters; configure
 those variables in the command's service environment before using it.
+
+## Execute approved staging
+
+Set `STOWARR_EXECUTOR_JELLYFIN_USER_ID` in `.env.approvals` to the eligible
+32-character Jellyfin user ID, then start `stowarr-staging` alongside the UI.
+It checks approved requests every minute and consumes one only after the same
+live eligibility and exact-release checks pass.
