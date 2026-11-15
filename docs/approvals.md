@@ -194,8 +194,8 @@ any client using the replacement category. It also requires qBittorrent's
 category `savePath` to resolve to the same staging path, resolves filesystem
 symlinks before overlap checks, and accepts `STOWARR_RADARR_ROOT_PATH_MAP` only
 as an explicit mapping for Radarr container paths that differ from Stowarr's.
-Startup fails closed when any root, mapping, category, save path, or shared path
-cannot be verified.
+The executor fails closed before every submission when any root, mapping,
+category, save path, or shared path cannot be verified.
 
 The direct submission uses the exact release URL returned by the live Radarr
 release search only as a source for qBittorrent. It never sends the release
