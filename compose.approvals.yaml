@@ -21,6 +21,7 @@ services:
     build: .
     environment:
       STOWARR_RADARR_DOWNLOAD_CLIENT_ID: "2"
+      STOWARR_QBITTORRENT_URL: "http://gluetun:8090"
       STOWARR_QBITTORRENT_CATEGORY: "stowarr"
     user: "${PUID:-1000}:${PGID:-10}"
     entrypoint: ["python", "/app/src/movie_staging_executor.py"]

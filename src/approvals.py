@@ -222,9 +222,10 @@ class ApprovalStore:
             result = [r for r in result if r["status"] in statuses]
         return result
 
-    def propose_recovery(self, rid, actor="staging-reconciler"):
-        """Create one pending approval after an irrecoverable missing release."""
+    def propose_recovery(self, rid, snapshot, actor="staging-reconciler"):
+        """Create one pending approval for a freshly revalidated candidate."""
         with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
             row = db.execute(
                 "SELECT a.recovery_request_id, r.snapshot FROM staging_attempts a "
                 "JOIN approval_requests r ON r.id=a.request_id WHERE a.request_id=?",
@@ -234,13 +235,15 @@ class ApprovalStore:
                 raise ValueError("Staging attempt not found")
             if row["recovery_request_id"]:
                 return row["recovery_request_id"]
-            snapshot = json.loads(row["snapshot"])
+            # The caller must have re-run live eligibility and candidate
+            # discovery. Never clone the consumed release snapshot here.
+            canonical(snapshot)
             new_id = uuid.uuid4().hex
             now = timestamp()
             expires = (datetime.now(timezone.utc) + timedelta(hours=72)).isoformat()
             db.execute(
                 "INSERT INTO approval_requests(id,snapshot,fingerprint,status,created_at,expires_at) "
-                "VALUES(?,?,?,?,?,?)", (new_id, row["snapshot"], fingerprint(snapshot),
+                "VALUES(?,?,?,?,?,?)", (new_id, canonical(snapshot), fingerprint(snapshot),
                                           "pending", now, expires)
             )
             db.execute("UPDATE staging_attempts SET recovery_request_id=? WHERE request_id=?",

@@ -93,6 +93,17 @@ class StagingClaimTests(unittest.TestCase):
         self.assertEqual(status, "approved")
         self.assertEqual(count, 0)
 
+    def test_recovery_persists_fresh_snapshot_once(self):
+        self.store.claim_staging(self.rid, self.snapshot)
+        fresh = dict(self.snapshot, release_id="b" * 40,
+                     release_title="Fresh Release")
+        first = self.store.propose_recovery(self.rid, fresh)
+        second = self.store.propose_recovery(self.rid, dict(self.snapshot))
+        self.assertEqual(first, second)
+        row = self.store.list()[0]
+        self.assertEqual(row["id"], first)
+        self.assertEqual(row["snapshot"]["release_id"], "b" * 40)
+
 
 if __name__ == "__main__":
     unittest.main()

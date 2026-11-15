@@ -6,7 +6,7 @@ import re
 from datetime import datetime, timezone
 
 LOG = logging.getLogger("stowarr.staging")
-ACTIVE = {"claimed", "submitting", "uncertain", "historical"}
+ACTIVE = {"claimed", "submitting", "confirmed", "uncertain", "historical"}
 DOWNLOADING = {"downloading", "metaDL", "forcedDL", "queuedDL", "checkingDL", "checkingResumeData"}
 STALLED = {"stalledDL", "pausedDL", "pausedUP", "missingFiles"}
 
@@ -34,8 +34,11 @@ def _history_state(records, movie_id, release_id):
     return state
 
 
-def reconcile_attempts(store, radarr, qbit=None, page_size=100):
-    attempts = store.list_staging_attempts(ACTIVE)
+def reconcile_attempts(store, radarr, qbit=None, page_size=100, recovery_factory=None):
+    attempts = [attempt for attempt in store.list_staging_attempts(ACTIVE)
+                if attempt.get("lifecycle_status") not in {"imported", "failed"}
+                and not (attempt.get("lifecycle_status") == "missing"
+                         and attempt.get("recovery_request_id"))]
     if not attempts:
         return []
     targets = {}
@@ -85,9 +88,11 @@ def reconcile_attempts(store, radarr, qbit=None, page_size=100):
         else:
             status = "confirmed" if state == "imported" else ("failed" if state == "failed" else "uncertain")
         recovery = None
-        if state == "missing":
-            recovery = store.propose_recovery(rid)
-            LOG.warning("staging_missing request_id=%s recovery_request_id=%s", rid, recovery)
+        if state == "missing" and recovery_factory is not None:
+            fresh_snapshot = recovery_factory(attempt)
+            if fresh_snapshot is not None:
+                recovery = store.propose_recovery(rid, fresh_snapshot)
+                LOG.warning("staging_missing request_id=%s recovery_request_id=%s", rid, recovery)
         if legacy and state == "grabbed":
             store.update_staging(rid, "confirmed")
         else:

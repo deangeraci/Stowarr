@@ -144,8 +144,13 @@ It checks approved requests every minute and consumes one only after the same
 live eligibility and exact-release checks pass. The executor sends only the
 exact Radarr release payload, with download client ID configured by
 `STOWARR_RADARR_DOWNLOAD_CLIENT_ID` (the compose example currently uses `2`),
-and the dedicated `stowarr` category. It never imports, replaces, moves, or
-deletes media and does not call any qBittorrent mutation endpoint.
+and the dedicated `stowarr` category. The production compose path uses the
+read-only qBittorrent Web API at `http://gluetun:8090`; override it with
+`STOWARR_QBITTORRENT_URL` only when the deployment topology differs. If
+qBittorrent requires authentication, set the username/password in the private
+`.env.approvals` file; the client logs in for a session cookie and never logs
+or exposes those values. It never imports, replaces, moves, or deletes media
+and does not call any qBittorrent mutation endpoint.
 
 ### Recovery lifecycle
 
@@ -165,8 +170,11 @@ qBittorrent's read-only `torrents/info` endpoint. It records these observations:
 - `ambiguous`: evidence is incomplete or a service is unavailable.
 
 An ambiguous result is logged and left for the next reconciliation. A missing
-release creates exactly one new pending approval linked to the old attempt; an
-operator must review it before any new grab. The old approval remains consumed.
+release re-runs live eligibility and Radarr candidate discovery, pins the
+currently best qualifying candidate, and creates exactly one new pending
+approval linked to the old attempt; an operator must review it before any new
+grab. The old approval remains consumed, and the stale release snapshot is
+never cloned.
 The executor never removes torrents, pauses/resumes them, deletes files, or
 automatically retries a grab.
 

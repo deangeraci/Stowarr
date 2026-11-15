@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import os
 import re
@@ -54,6 +55,21 @@ def live_eligible(clients, state_db, user_id, movie, delay):
         ):
             matches.append(item)
     return len(matches) == 1
+
+
+def fresh_recovery_snapshot(attempt, clients, config, state_db, user_id):
+    """Re-run read-only eligibility and candidate discovery for recovery."""
+    old = json.loads(attempt["snapshot"])
+    mid = movie_id(old)
+    response = clients["radarr"].request(f"/api/v3/movie/{mid}", timeout=180)
+    response.raise_for_status()
+    movie = response.json()
+    if not live_eligible(clients, state_db, user_id, movie, configured_grace_days(config)):
+        return None
+    response = clients["radarr"].request(f"/api/v3/release?movieId={mid}", timeout=180)
+    response.raise_for_status()
+    found = candidates(movie, response.json(), config)
+    return found[0][1] if found else None
 
 
 def stage_one(store, request, clients, config, state_db, user_id):
@@ -134,16 +150,21 @@ def main():
         raise SystemExit("Jellyfin and Radarr services must be configured")
     store = ApprovalStore(args.approval_db)
     qbit = QbitTorrentClient(
-        os.environ.get("STOWARR_QBITTORRENT_URL", "http://qbittorrent:8080"),
+        os.environ.get("STOWARR_QBITTORRENT_URL", "http://gluetun:8090"),
         os.environ.get("STOWARR_QBITTORRENT_CATEGORY", "stowarr"),
+        os.environ.get("STOWARR_QBITTORRENT_USERNAME_ENV", "STOWARR_QBITTORRENT_USERNAME"),
+        os.environ.get("STOWARR_QBITTORRENT_PASSWORD_ENV", "STOWARR_QBITTORRENT_PASSWORD"),
     )
+    def recovery_factory(attempt):
+        return fresh_recovery_snapshot(attempt, clients, config, args.state_db, user_id)
     last_reconciliation = None
     while True:
         now = time.monotonic()
         if last_reconciliation is None or now - last_reconciliation >= 900:
             last_reconciliation = now
             try:
-                for result in reconcile_attempts(store, clients["radarr"], qbit):
+                for result in reconcile_attempts(store, clients["radarr"], qbit,
+                                                 recovery_factory=recovery_factory):
                     rid, status, *recovery = result
                     print(f"{rid} | reconciled: {status}" +
                           (f"; fresh approval {recovery[0]}" if recovery and recovery[0] else ""),

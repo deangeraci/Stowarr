@@ -31,6 +31,44 @@ class RecoveryTests(unittest.TestCase):
         qbit.state.return_value = qbit_state
         return store, qbit, reconcile_attempts(store, radarr, qbit)
 
+    def test_confirmed_attempt_is_monitored_through_terminal_import(self):
+        store = Mock()
+        attempt = self.attempt()
+        attempt.update({"status": "confirmed", "lifecycle_status": "downloading",
+                        "recovery_request_id": None})
+        terminal = dict(attempt, lifecycle_status="imported")
+        store.list_staging_attempts.side_effect = [[attempt], [attempt], [attempt], [terminal]]
+        radarr = Mock()
+        radarr.request.return_value = self.response([self.record("grabbed")])
+        qbit = Mock()
+        qbit.state.side_effect = ["downloading", "stalledDL", "removed"]
+        self.assertEqual(reconcile_attempts(store, radarr, qbit)[0][1], "downloading")
+        self.assertEqual(reconcile_attempts(store, radarr, qbit)[0][1], "stalled")
+        radarr.request.return_value = self.response([self.record("downloadFolderImported")])
+        self.assertEqual(reconcile_attempts(store, radarr, qbit)[0][1], "imported")
+        # Once imported, the next pass does not query Radarr/qBittorrent.
+        self.assertEqual(reconcile_attempts(store, radarr, qbit), [])
+
+    def test_missing_uses_fresh_candidate_and_is_at_most_once(self):
+        store = Mock()
+        store.list_staging_attempts.side_effect = [
+            [self.attempt()],
+            [dict(self.attempt(), lifecycle_status="missing", recovery_request_id="new")],
+        ]
+        radarr = Mock()
+        radarr.request.return_value = self.response([self.record("grabbed")])
+        qbit = Mock()
+        qbit.state.return_value = "removed"
+        fresh = {"identity_key": "movie:radarr:15", "title": "New", "source_file_id": "2",
+                 "source_size_bytes": 20, "release_id": "b" * 40, "release_title": "New",
+                 "release_size_bytes": 10, "indexer_id": "1"}
+        factory = Mock(return_value=fresh)
+        reconcile_attempts(store, radarr, qbit, recovery_factory=factory)
+        factory.assert_called_once()
+        store.propose_recovery.assert_called_once_with("r1", fresh)
+        reconcile_attempts(store, radarr, qbit, recovery_factory=factory)
+        self.assertEqual(factory.call_count, 1)
+
     def test_downloading_and_stalled_are_observable_without_mutation(self):
         store, qbit, result = self.run_case("downloading")
         self.assertEqual(result[0][1], "downloading")
@@ -50,7 +88,7 @@ class RecoveryTests(unittest.TestCase):
     def test_removed_download_gets_one_fresh_approval(self):
         store, qbit, result = self.run_case("removed")
         self.assertEqual(result[0][1], "missing")
-        store.propose_recovery.assert_called_once_with("r1")
+        store.propose_recovery.assert_not_called()
 
     def test_ambiguous_outcome_never_recovery_retries(self):
         store, qbit, result = self.run_case("removed", event="")
