@@ -59,6 +59,29 @@ class ServiceClient:
             timeout=timeout,
         )
 
+
+class QbitTorrentClient:
+    """Read-only qBittorrent adapter; it intentionally has no mutation methods."""
+
+    def __init__(self, base_url, category="stowarr"):
+        self.base_url = base_url.rstrip("/")
+        self.category = category
+
+    def state(self, torrent_hash):
+        response = requests.get(
+            self.base_url + "/api/v2/torrents/info",
+            params={"hashes": torrent_hash, "category": self.category},
+            timeout=30,
+        )
+        response.raise_for_status()
+        rows = response.json()
+        for row in rows:
+            if str(row.get("hash", "")).lower() == torrent_hash.lower():
+                # qBittorrent names are stable API values; callers only use
+                # this method to classify existence and progress.
+                return str(row.get("state", "")).strip()
+        return "removed"
+
     def connectivity_test(self) -> ServiceResult:
         paths = {
             "jellyfin": "/System/Info/Public",

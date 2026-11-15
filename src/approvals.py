@@ -55,7 +55,7 @@ class ApprovalStore:
                 request_id TEXT PRIMARY KEY,
                 release_id TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'claimed'
-                    CHECK(status IN ('claimed','submitting','confirmed','uncertain','failed')),
+                    CHECK(status IN ('claimed','submitting','confirmed','uncertain','failed','historical')),
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_error TEXT,
@@ -80,6 +80,24 @@ class ApprovalStore:
                     "ALTER TABLE staging_attempts "
                     "ADD COLUMN last_observed_at TEXT"
                 )
+            if "recovery_request_id" not in columns:
+                db.execute("ALTER TABLE staging_attempts ADD COLUMN recovery_request_id TEXT")
+            # Consumed approvals created before staging_attempts existed are
+            # retained as historical records so the October 8 backlog can be
+            # reconciled without ever replaying the approval.
+            # Use the pre-existing 'uncertain' value for the physical status:
+            # old installations have a CHECK constraint that predates the
+            # historical label. The lifecycle_status column carries the
+            # migration marker on both old and new schemas.
+            db.execute(
+                "INSERT OR IGNORE INTO staging_attempts "
+                "(request_id, release_id, status, created_at, updated_at, "
+                "lifecycle_status, last_observed_at) "
+                "SELECT r.id, json_extract(r.snapshot, '$.release_id'), "
+                "'uncertain', r.created_at, r.created_at, 'historical', NULL "
+                "FROM approval_requests r LEFT JOIN staging_attempts a "
+                "ON a.request_id=r.id WHERE r.status='consumed' AND a.request_id IS NULL"
+            )
 
     @contextmanager
     def connect(self):
@@ -170,16 +188,19 @@ class ApprovalStore:
             )
 
 
-    def update_staging(self, rid, status, error=None):
+    def update_staging(self, rid, status, error=None, lifecycle_status=None,
+                       observed_at=None):
         """Persist submission outcome without changing approval state."""
         if status not in {"submitting", "confirmed", "uncertain", "failed"}:
             raise ValueError("Invalid staging status")
         now = timestamp()
         with self.connect() as db:
             changed = db.execute(
-                "UPDATE staging_attempts SET status=?, updated_at=?, last_error=? "
+                "UPDATE staging_attempts SET status=?, updated_at=?, last_error=?, "
+                "lifecycle_status=COALESCE(?, lifecycle_status), "
+                "last_observed_at=COALESCE(?, last_observed_at) "
                 "WHERE request_id=?",
-                (status, now, error, rid)
+                (status, now, error, lifecycle_status, observed_at, rid)
             ).rowcount
             if changed != 1:
                 raise ValueError("Staging attempt not found")
@@ -190,7 +211,8 @@ class ApprovalStore:
         with self.connect() as db:
             rows = db.execute(
                 "SELECT a.request_id, a.release_id, a.status, a.created_at, "
-                "a.updated_at, r.snapshot "
+                "a.updated_at, a.lifecycle_status, a.last_observed_at, "
+                "a.recovery_request_id, r.snapshot "
                 "FROM staging_attempts a "
                 "JOIN approval_requests r ON r.id=a.request_id "
                 "ORDER BY a.created_at"
@@ -199,6 +221,33 @@ class ApprovalStore:
         if statuses is not None:
             result = [r for r in result if r["status"] in statuses]
         return result
+
+    def propose_recovery(self, rid, actor="staging-reconciler"):
+        """Create one pending approval after an irrecoverable missing release."""
+        with self.connect() as db:
+            row = db.execute(
+                "SELECT a.recovery_request_id, r.snapshot FROM staging_attempts a "
+                "JOIN approval_requests r ON r.id=a.request_id WHERE a.request_id=?",
+                (rid,),
+            ).fetchone()
+            if not row:
+                raise ValueError("Staging attempt not found")
+            if row["recovery_request_id"]:
+                return row["recovery_request_id"]
+            snapshot = json.loads(row["snapshot"])
+            new_id = uuid.uuid4().hex
+            now = timestamp()
+            expires = (datetime.now(timezone.utc) + timedelta(hours=72)).isoformat()
+            db.execute(
+                "INSERT INTO approval_requests(id,snapshot,fingerprint,status,created_at,expires_at) "
+                "VALUES(?,?,?,?,?,?)", (new_id, row["snapshot"], fingerprint(snapshot),
+                                          "pending", now, expires)
+            )
+            db.execute("UPDATE staging_attempts SET recovery_request_id=? WHERE request_id=?",
+                       (new_id, rid))
+            db.execute("INSERT INTO approval_events(request_id,event,actor,at) VALUES(?,?,?,?)",
+                       (new_id, "recovery_proposed", actor, now))
+            return new_id
 
 
 def main():

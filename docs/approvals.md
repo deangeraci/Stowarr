@@ -141,4 +141,42 @@ those variables in the command's service environment before using it.
 Set `STOWARR_EXECUTOR_JELLYFIN_USER_ID` in `.env.approvals` to the eligible
 32-character Jellyfin user ID, then start `stowarr-staging` alongside the UI.
 It checks approved requests every minute and consumes one only after the same
-live eligibility and exact-release checks pass.
+live eligibility and exact-release checks pass. The executor sends only the
+exact Radarr release payload, with download client ID configured by
+`STOWARR_RADARR_DOWNLOAD_CLIENT_ID` (the compose example currently uses `2`),
+and the dedicated `stowarr` category. It never imports, replaces, moves, or
+deletes media and does not call any qBittorrent mutation endpoint.
+
+### Recovery lifecycle
+
+Every consumed approval has one durable staging attempt. The claim and attempt
+row are committed in one SQLite transaction, so a restart or concurrent worker
+cannot claim the approval twice. A submission timeout, 5xx, or 429 is recorded
+as `uncertain`; a deterministic Radarr 4xx is `failed`. Neither is retried.
+
+Reconciliation runs before processing new approvals and reads Radarr history and
+qBittorrent's read-only `torrents/info` endpoint. It records these observations:
+
+- `grabbed`: Radarr accepted the exact movie/hash;
+- `downloading` or `stalled`: the exact hash still exists in category `stowarr`;
+- `imported`: Radarr completed an import, without Stowarr touching library files;
+- `failed`: Radarr reported a failed download;
+- `missing`: Radarr had grabbed it but the exact categorized torrent is gone;
+- `ambiguous`: evidence is incomplete or a service is unavailable.
+
+An ambiguous result is logged and left for the next reconciliation. A missing
+release creates exactly one new pending approval linked to the old attempt; an
+operator must review it before any new grab. The old approval remains consumed.
+The executor never removes torrents, pauses/resumes them, deletes files, or
+automatically retries a grab.
+
+On startup, the schema migration backfills consumed approvals that predate the
+staging table as historical attempts. This is intentionally read-only and lets
+the four consumed approvals from October 8 be reconciled against current Radarr
+history/qBittorrent state without replaying them. Backups should be taken before
+upgrading, and the service should be monitored for `staging_reconciled`,
+`staging_missing`, and `Staging reconciliation failed` log lines.
+
+Existing 4K media is preserved: this workflow only stages an approved smaller
+candidate and does not run Radarr import or replacement operations. Keep
+Cleanuparr deletion disabled in production.
