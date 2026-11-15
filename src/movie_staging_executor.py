@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import json
 import logging
 import os
 import re
@@ -18,6 +19,7 @@ from staging_reconciliation import reconcile_attempts
 from clients import QbitTorrentClient, ServiceClient
 from completion_config import configured_grace_days
 from movie_approvals import candidates, eligible_completion, provider_matches, read_live_item
+from staging_isolation import path_is_within, validate_source_url, verify_replacement_isolation
 
 
 def movie_id(snapshot):
@@ -77,8 +79,41 @@ def fresh_recovery_snapshot(attempt, clients, config, state_db, user_id):
     return None
 
 
-def stage_one(store, request, clients, config, state_db, user_id):
+def _radarr_root_paths(client):
+    response = client.request("/api/v3/rootfolder", timeout=30)
+    response.raise_for_status()
+    roots = response.json()
+    paths = [item.get("path") for item in roots if isinstance(item, dict)]
+    if not paths or any(not isinstance(path, str) for path in paths):
+        raise ValueError("Radarr root folders could not be verified")
+    return paths
+
+
+def _radarr_download_clients(client):
+    response = client.request("/api/v3/downloadclient", timeout=30)
+    response.raise_for_status()
+    clients = response.json()
+    if not isinstance(clients, list):
+        raise ValueError("Radarr download clients could not be verified")
+    return clients
+
+
+def _path_mappings():
+    raw = os.environ.get("STOWARR_RADARR_ROOT_PATH_MAP", "")
+    if not raw:
+        return {}
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError("STOWARR_RADARR_ROOT_PATH_MAP must be JSON") from exc
+    if not isinstance(value, dict):
+        raise ValueError("STOWARR_RADARR_ROOT_PATH_MAP must be an object")
+    return value
+
+
+def stage_one(store, request, clients, config, state_db, user_id, qbit):
     snapshot = request["snapshot"]
+    claimed = False
     try:
         mid = movie_id(snapshot)
         response = clients["radarr"].request("/api/v3/movie/" + str(mid), timeout=180)
@@ -100,35 +135,71 @@ def stage_one(store, request, clients, config, state_db, user_id):
         client_id = int(os.environ.get("STOWARR_RADARR_DOWNLOAD_CLIENT_ID", "0"))
         if client_id <= 0:
             return "deferred: dedicated Radarr download client not configured"
-        raw["downloadClientId"] = client_id
-        raw["category"] = os.environ.get("STOWARR_QBITTORRENT_CATEGORY", "stowarr")
+        replacement_category = os.environ.get(
+            "STOWARR_REPLACEMENT_CATEGORY", "stowarr-replacement")
+        replacement_path = os.environ.get("STOWARR_REPLACEMENT_PATH", "")
+        monitored_category = os.environ.get("STOWARR_QBITTORRENT_CATEGORY", "stowarr")
+        isolated_path = verify_replacement_isolation(
+            clients["radarr"], qbit, client_id, monitored_category,
+            replacement_category, replacement_path, _radarr_root_paths(clients["radarr"]),
+            _radarr_download_clients(clients["radarr"]), _path_mappings()
+        )
+        source_url = validate_source_url(raw.get("downloadUrl") or raw.get("magnetUrl"))
+        existing = qbit.info(snapshot["release_id"])
+        if existing is not None:
+            if (str(existing.get("category") or "") != replacement_category or
+                    not path_is_within(str(existing.get("save_path") or ""), isolated_path)):
+                return "failed: existing torrent is outside replacement isolation"
         store.claim_staging(request["id"], snapshot, actor="staging-executor")
-        store.update_staging(request["id"], "submitting")
+        claimed = True
+        store.update_staging(
+            request["id"], "submitting", lifecycle_status="submitting",
+            torrent_hash=snapshot["release_id"], staging_category=replacement_category,
+            download_path=isolated_path,
+        )
         try:
-            response = requests.post(clients["radarr"].base_url + "/api/v3/release",
-                headers=clients["radarr"]._headers(), json=raw, timeout=180)
-            response.raise_for_status()
+            if existing is None:
+                qbit.add_torrent(source_url, replacement_category, isolated_path)
+            row = qbit.info(snapshot["release_id"], replacement_category)
+            if row is None:
+                store.update_staging(request["id"], "uncertain",
+                                     error="qBittorrent accepted no observable torrent")
+                return "uncertain: qBittorrent submission requires reconciliation"
+            if (str(row.get("category") or "") != replacement_category or
+                    not path_is_within(str(row.get("save_path") or ""), isolated_path)):
+                store.update_staging(request["id"], "failed",
+                                     error="qBittorrent returned an isolated-path mismatch")
+                return "failed: qBittorrent isolation verification failed"
         except requests.HTTPError as exc:
             response = exc.response
             if response is not None and 400 <= response.status_code < 500 and response.status_code not in {408, 429}:
-                store.update_staging(request["id"], "failed")
-                return "failed: Radarr rejected the exact release"
-            store.update_staging(request["id"], "uncertain")
-            return "uncertain: Radarr submission requires reconciliation"
+                store.update_staging(request["id"], "failed", error="qBittorrent rejected the release")
+                return "failed: qBittorrent rejected the release"
+            store.update_staging(request["id"], "uncertain",
+                                 error="qBittorrent submission requires reconciliation")
+            return "uncertain: qBittorrent submission requires reconciliation"
         except requests.RequestException as exc:
-            store.update_staging(request["id"], "uncertain")
-            return "uncertain: Radarr submission requires reconciliation"
-        store.update_staging(request["id"], "confirmed")
+            store.update_staging(request["id"], "uncertain", error=type(exc).__name__)
+            return "uncertain: qBittorrent submission requires reconciliation"
+        store.update_staging(request["id"], "confirmed", lifecycle_status="downloading",
+                             torrent_hash=snapshot["release_id"], staging_category=replacement_category,
+                             download_path=isolated_path)
         return "staged: " + snapshot["title"]
     except (ValueError, requests.RequestException, sqlite3.Error) as exc:
+        if claimed:
+            store.update_staging(request["id"], "failed", error=type(exc).__name__,
+                                 lifecycle_status="failed")
         return "failed: " + str(exc)
 
 
-def run_once(store, clients, config, state_db, user_id):
+def run_once(store, clients, config, state_db, user_id, qbit):
     for request in store.list():
         if request["status"] == "approved":
+            if request.get("workflow_version") != "direct-qbit-v1":
+                print(request["id"] + " | deferred: explicit Phase 1 migration required", flush=True)
+                continue
             print(request["id"] + " | " + stage_one(
-                store, request, clients, config, state_db, user_id
+                store, request, clients, config, state_db, user_id, qbit
             ), flush=True)
 
 
@@ -177,7 +248,7 @@ def main():
             except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
                 print(f"Staging reconciliation failed: {type(exc).__name__}", flush=True)
 
-        run_once(store, clients, config, args.state_db, user_id)
+        run_once(store, clients, config, args.state_db, user_id, qbit)
         if args.once:
             return
         time.sleep(args.interval_seconds)

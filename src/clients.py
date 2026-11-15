@@ -75,7 +75,7 @@ class ServiceClient:
 
 
 class QbitTorrentClient:
-    """Read-only qBittorrent adapter; it intentionally has no mutation methods."""
+    """qBittorrent adapter with narrowly scoped staging submission support."""
 
     def __init__(self, base_url, category="stowarr", username_env=None,
                  password_env=None, session=None):
@@ -99,45 +99,70 @@ class QbitTorrentClient:
             self.base_url + "/api/v2/auth/login",
             data={"username": username, "password": password},
             timeout=30, allow_redirects=False)
-        body = response.text.strip().lower()
-        login_ok = (
-            (response.status_code == 200 and body in {"ok", "ok."})
-            or (response.status_code == 204 and not body)
-        )
-        # Use the login response's cookies so a stale session cannot satisfy this check.
+        body = str(response.text or "").strip().lower()
+        login_ok = ((response.status_code == 200 and body in {"ok", "ok."}) or
+                    (response.status_code == 204 and not body))
         has_session_cookie = any(
             cookie.value and re.fullmatch(r"SID|QBT_SID_[0-9]+", cookie.name)
             for cookie in response.cookies
         )
         if not login_ok or not has_session_cookie:
             raise requests.RequestException("qBittorrent login failed")
-
         version = self.session.get(
-            self.base_url + "/api/v2/app/version", timeout=30, allow_redirects=False)
+            self.base_url + "/api/v2/app/version",
+            timeout=30, allow_redirects=False,
+        )
         if version.status_code != 200 or not re.fullmatch(
-                r"v?[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+_-]*", version.text.strip()):
+                r"v?[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+_-]*", str(version.text or "").strip()):
             raise requests.RequestException("qBittorrent session verification failed")
         self.authenticated = True
 
-    def state(self, torrent_hash):
+    def info(self, torrent_hash, category=None):
         self._login_if_configured()
+        params = {"hashes": torrent_hash}
+        if category is not None:
+            params["category"] = category
         response = self.session.get(
-            self.base_url + "/api/v2/torrents/info",
-            params={"hashes": torrent_hash, "category": self.category},
-            timeout=30,
-        )
-        if (response.status_code in {401, 403} and self.username_env and self.password_env
-                and os.environ.get(self.username_env) and os.environ.get(self.password_env)):
+            self.base_url + "/api/v2/torrents/info", params=params, timeout=30)
+        if response.status_code in {401, 403} and self.authenticated:
             self.authenticated = False
             self._login_if_configured()
             response = self.session.get(
-                self.base_url + "/api/v2/torrents/info",
-                params={"hashes": torrent_hash, "category": self.category}, timeout=30)
+                self.base_url + "/api/v2/torrents/info", params=params, timeout=30)
         response.raise_for_status()
-        rows = response.json()
-        for row in rows:
+        for row in response.json():
             if str(row.get("hash", "")).lower() == torrent_hash.lower():
-                # qBittorrent names are stable API values; callers only use
-                # this method to classify existence and progress.
-                return str(row.get("state", "")).strip()
-        return "removed"
+                return row
+        return None
+
+    def state(self, torrent_hash, category=None):
+        row = self.info(torrent_hash, self.category if category is None else category)
+        return str(row.get("state", "")).strip() if row else "removed"
+
+    def add_torrent(self, source_url, category, save_path):
+        """Add one approved release directly to qBittorrent.
+
+        The caller must prove category and path isolation before invoking this
+        method. No Radarr endpoint is called here.
+        """
+        self._login_if_configured()
+        response = self.session.post(
+            self.base_url + "/api/v2/torrents/add",
+            data={"urls": source_url, "category": category, "savepath": save_path},
+            timeout=30, allow_redirects=False,
+        )
+        response.raise_for_status()
+        if str(response.text or "").strip().lower() not in {"ok", "ok."}:
+            raise requests.RequestException("qBittorrent rejected torrent submission")
+
+    def categories(self):
+        self._login_if_configured()
+        response = self.session.get(
+            self.base_url + "/api/v2/torrents/categories",
+            timeout=30, allow_redirects=False,
+        )
+        response.raise_for_status()
+        result = response.json()
+        if not isinstance(result, dict):
+            raise requests.RequestException("qBittorrent returned invalid categories")
+        return result

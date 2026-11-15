@@ -112,6 +112,30 @@ class StagingClaimTests(unittest.TestCase):
         self.store.claim_staging(b_request, b)
         self.assertEqual(self.store.attempted_release_ids(b_request), {"a" * 40, "b" * 40})
 
+    def test_duplicate_release_is_rejected_across_requests(self):
+        self.store.claim_staging(self.rid, self.snapshot)
+        duplicate = dict(self.snapshot, title="Another proposal")
+        duplicate_id = self.store.propose(duplicate)
+        self.store.decide(duplicate_id, fingerprint(duplicate), "approved", "test")
+        with self.assertRaisesRegex(ValueError, "already staged"):
+            self.store.claim_staging(duplicate_id, duplicate)
+
+    def test_pending_legacy_requests_migrate_without_consumption(self):
+        with sqlite3.connect(self.store.path) as db:
+            db.execute("UPDATE approval_requests SET workflow_version='radarr-grab-v0' WHERE id=?", (self.rid,))
+            db.execute("UPDATE approval_requests SET status='pending' WHERE id=?", (self.rid,))
+        self.assertEqual(len(self.store.pending_migration_preview()), 1)
+        with self.assertRaises(PermissionError):
+            self.store.migrate_pending_to_direct_qbit()
+        migrated = self.store.migrate_pending_to_direct_qbit(actor="reviewer", authorized=True)
+        self.assertEqual(migrated, [self.rid])
+        row = self.store.list()[0]
+        self.assertEqual(row["workflow_version"], "direct-qbit-v1")
+        with sqlite3.connect(self.store.path) as db:
+            events = [row[0] for row in db.execute(
+                "SELECT event FROM approval_events WHERE request_id=?", (self.rid,))]
+        self.assertIn("phase1_migrated", events)
+
 
 if __name__ == "__main__":
     unittest.main()
