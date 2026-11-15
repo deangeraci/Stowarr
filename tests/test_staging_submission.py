@@ -52,9 +52,9 @@ class SubmissionTests(unittest.TestCase):
                 "downloadUrl": "magnet:?xt=urn:btih:" + "a" * 40,
             }]),
             Mock(json=lambda: [{"path": str(self.root_path)}]),
-            Mock(json=lambda: {"id": 2, "fields": [{"name": "movieCategory", "value": "stowarr"}]}),
             Mock(json=lambda: [{"id": 2, "enable": True,
                                 "fields": [{"name": "movieCategory", "value": "stowarr"}]}]),
+            Mock(json=lambda: {"id": 2, "fields": [{"name": "movieCategory", "value": "stowarr"}]}),
         ]
         self.clients = {"radarr": self.radarr}
         self.qbit = Mock()

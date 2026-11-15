@@ -83,7 +83,7 @@ class IsolationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp) / "media"; root.mkdir()
             alias = Path(tmp) / "alias"; alias.symlink_to(root, target_is_directory=True)
-            replacement = Path(tmp) / "replacements"; replacement.mkdir()
+            replacement = alias / "replacements"; replacement.mkdir()
             radarr, qbit = self.clients(save_path=str(replacement))
             with self.assertRaises(IsolationError):
                 verify_replacement_isolation(
