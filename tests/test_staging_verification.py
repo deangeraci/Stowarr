@@ -9,6 +9,10 @@ from staging_verification import verify_attempt
 
 
 class StagingVerificationTests(unittest.TestCase):
+    def setUp(self):
+        if sys.platform == "win32":
+            self.skipTest("container-path verification tests require POSIX paths")
+
     def test_completed_candidate_records_manifest_without_import(self):
         store = Mock()
         qbit = Mock()

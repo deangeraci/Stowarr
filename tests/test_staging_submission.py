@@ -1,4 +1,5 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -6,18 +7,25 @@ from unittest.mock import Mock, patch
 import requests
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-from movie_staging_executor import stage_one
+from movie_staging_executor import run_once, stage_one
 
 
 class SubmissionTests(unittest.TestCase):
     def setUp(self):
+        if sys.platform == "win32":
+            self.skipTest("container-path isolation tests require POSIX paths")
+        self.tmp = tempfile.TemporaryDirectory()
+        self.replacement_path = Path(self.tmp.name) / "replacements"
+        self.root_path = Path(self.tmp.name) / "movies"
+        self.replacement_path.mkdir(); self.root_path.mkdir()
         self.env_patch = patch.dict(
             "os.environ",
             {
                 "STOWARR_RADARR_DOWNLOAD_CLIENT_ID": "2",
                 "STOWARR_QBITTORRENT_CATEGORY": "stowarr",
                 "STOWARR_REPLACEMENT_CATEGORY": "stowarr-replacement",
-                "STOWARR_REPLACEMENT_PATH": "/data/replacements",
+                "STOWARR_REPLACEMENT_PATH": str(self.replacement_path),
+                "STOWARR_RADARR_ROOT_PATH_MAP": "",
             }, clear=False)
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
@@ -43,15 +51,19 @@ class SubmissionTests(unittest.TestCase):
                 "size": 1000,
                 "downloadUrl": "magnet:?xt=urn:btih:" + "a" * 40,
             }]),
-            Mock(json=lambda: [{"path": "/data/media/movies"}]),
+            Mock(json=lambda: [{"path": str(self.root_path)}]),
             Mock(json=lambda: {"id": 2, "fields": [{"name": "movieCategory", "value": "stowarr"}]}),
+            Mock(json=lambda: [{"id": 2, "enable": True,
+                                "fields": [{"name": "movieCategory", "value": "stowarr"}]}]),
         ]
         self.clients = {"radarr": self.radarr}
         self.qbit = Mock()
-        self.qbit.categories.return_value = {"stowarr-replacement": {}}
+        self.qbit.categories.return_value = {
+            "stowarr-replacement": {"savePath": str(self.replacement_path)}
+        }
         self.qbit.info.side_effect = [
             None,
-            {"hash": "a" * 40, "category": "stowarr-replacement", "save_path": "/data/replacements"},
+            {"hash": "a" * 40, "category": "stowarr-replacement", "save_path": str(self.replacement_path)},
         ]
 
     @patch("movie_staging_executor.exact_release", return_value={})
@@ -65,7 +77,7 @@ class SubmissionTests(unittest.TestCase):
         self.store.update_staging.assert_any_call(
             "req1", "confirmed", lifecycle_status="downloading",
             torrent_hash="a" * 40, staging_category="stowarr-replacement",
-            download_path="/data/replacements")
+            download_path=str(self.replacement_path.resolve()))
 
     @patch("movie_staging_executor.exact_release", return_value={})
     @patch("movie_staging_executor.live_eligible", return_value=True)
@@ -86,6 +98,15 @@ class SubmissionTests(unittest.TestCase):
         self.assertTrue(result.startswith("failed:"))
         self.qbit.add_torrent.assert_not_called()
         self.store.claim_staging.assert_not_called()
+
+    @patch("movie_staging_executor.print")
+    def test_legacy_approval_is_deferred_until_explicit_migration(self, output):
+        store = Mock()
+        store.list.return_value = [{"id": "legacy", "status": "approved",
+                                    "workflow_version": "radarr-grab-v0"}]
+        run_once(store, self.clients, {}, "", "", self.qbit)
+        self.assertIn("explicit Phase 1 migration", output.call_args.args[0])
+        self.qbit.add_torrent.assert_not_called()
 
 
 if __name__ == "__main__":

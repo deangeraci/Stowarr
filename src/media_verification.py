@@ -8,7 +8,7 @@ from pathlib import Path
 
 
 MEDIA_SUFFIXES = {".mkv", ".mp4", ".m4v", ".avi", ".ts", ".mov"}
-MAX_VERIFY_BYTES = 32 * 1024 * 1024 * 1024
+MAX_VERIFY_BYTES = 16 * 1024 * 1024 * 1024
 MAX_VERIFY_SECONDS = 1800
 
 

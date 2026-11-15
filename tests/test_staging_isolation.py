@@ -9,6 +9,10 @@ from staging_isolation import IsolationError, validate_source_url, verify_replac
 
 
 class IsolationTests(unittest.TestCase):
+    def setUp(self):
+        if sys.platform == "win32":
+            self.skipTest("container-path isolation tests require POSIX paths")
+
     def clients(self, category="stowarr-replacement", save_path=None, all_clients=None):
         radarr = Mock()
         response = Mock()
@@ -30,7 +34,7 @@ class IsolationTests(unittest.TestCase):
             path = verify_replacement_isolation(
                 radarr, qbit, 2, "stowarr", "stowarr-replacement", str(replacement),
                 ["/radarr/movies"], [{"id": 2, "enable": True,
-                "fields": [{"name": "movieCategory", "value": "stowarr"}]}][0:1],
+                "fields": [{"name": "movieCategory", "value": "stowarr"}]}],
                 {"/radarr/movies": str(root)})
             self.assertEqual(path, str(replacement.resolve()))
 

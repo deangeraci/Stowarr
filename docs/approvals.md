@@ -189,8 +189,13 @@ It does not submit them to Radarr's `/api/v3/release` endpoint. Set
 different from Radarr's monitored `STOWARR_QBITTORRENT_CATEGORY`, and set
 `STOWARR_REPLACEMENT_PATH` to an absolute path visible identically to the
 qBittorrent and Stowarr containers. The path must be outside every Radarr root
-folder. Startup fails closed when Radarr's configured category, qBittorrent's
-category list, or the shared path cannot be verified.
+folder. The executor enumerates every enabled Radarr download client and rejects
+any client using the replacement category. It also requires qBittorrent's
+category `savePath` to resolve to the same staging path, resolves filesystem
+symlinks before overlap checks, and accepts `STOWARR_RADARR_ROOT_PATH_MAP` only
+as an explicit mapping for Radarr container paths that differ from Stowarr's.
+Startup fails closed when any root, mapping, category, save path, or shared path
+cannot be verified.
 
 The direct submission uses the exact release URL returned by the live Radarr
 release search only as a source for qBittorrent. It never sends the release
@@ -203,8 +208,10 @@ HTTP 200 `Ok.` responses.
 Completed downloads remain in `complete_unverified` until the read-only
 `staging_verification.py` command confirms the qBittorrent hash/category/path,
 file size, ffprobe metadata, SHA-256 digest, and a full ffmpeg video decode.
-Verification only records a manifest. Phase 1 has no media swap, deletion,
-quarantine cleanup, or Radarr quality-profile mutation.
+Verification only records a manifest. FFmpeg is restricted to one worker thread,
+each job has a bounded timeout and 32 GiB file-size ceiling, and the CLI caps
+concurrent verification jobs at four (`STOWARR_VERIFY_WORKERS`). Phase 1 has no
+media swap, deletion, quarantine cleanup, or Radarr quality-profile mutation.
 
 Run verification for the isolated staging service with:
 

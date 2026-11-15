@@ -55,7 +55,7 @@ def main():
     parser.add_argument("--workers", type=int,
                         default=int(os.getenv("STOWARR_VERIFY_WORKERS", "4")))
     parser.add_argument("--max-bytes", type=int,
-                        default=int(os.getenv("STOWARR_VERIFY_MAX_BYTES", str(32 * 1024 ** 3)))
+                        default=int(os.getenv("STOWARR_VERIFY_MAX_BYTES", str(16 * 1024 ** 3)))
                         )
     parser.add_argument("--max-seconds", type=int,
                         default=int(os.getenv("STOWARR_VERIFY_MAX_SECONDS", "1800")))
