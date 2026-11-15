@@ -98,6 +98,8 @@ class QbitTorrentClient:
             self.base_url + "/api/v2/auth/login",
             data={"username": username, "password": password}, timeout=30)
         response.raise_for_status()
+        if str(response.text or "").strip().lower() not in {"ok", "ok."}:
+            raise requests.RequestException("qBittorrent login failed")
         self.authenticated = True
 
     def state(self, torrent_hash):

@@ -90,6 +90,19 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result[0][1], "missing")
         store.propose_recovery.assert_not_called()
 
+    def test_missing_with_no_different_candidate_stays_missing(self):
+        store = Mock()
+        store.list_staging_attempts.return_value = [self.attempt()]
+        radarr = Mock()
+        radarr.request.return_value = self.response([self.record("grabbed")])
+        qbit = Mock()
+        qbit.state.return_value = "removed"
+        factory = Mock(return_value=None)
+        result = reconcile_attempts(store, radarr, qbit, recovery_factory=factory)
+        self.assertEqual(result[0][1], "missing")
+        factory.assert_called_once()
+        store.propose_recovery.assert_not_called()
+
     def test_ambiguous_outcome_never_recovery_retries(self):
         store, qbit, result = self.run_case("removed", event="")
         self.assertEqual(result[0][1], "ambiguous")

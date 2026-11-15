@@ -21,7 +21,8 @@ class FreshRecoveryCandidateTests(unittest.TestCase):
         response.json.side_effect = [movie, [{"title": "Fresh"}]]
         radarr.request.return_value = response
         clients = {"radarr": radarr, "jellyfin": Mock()}
-        attempt = {"snapshot": json.dumps({"identity_key": "movie:radarr:15",
+        attempt = {"release_id": "a" * 40,
+                   "snapshot": json.dumps({"identity_key": "movie:radarr:15",
                                              "release_id": "a" * 40})}
         with patch("movie_staging_executor.live_eligible", return_value=True), \
              patch("movie_staging_executor.candidates", return_value=[(5, candidate)]):
@@ -29,6 +30,24 @@ class FreshRecoveryCandidateTests(unittest.TestCase):
         self.assertEqual(result, candidate)
         self.assertEqual(radarr.request.call_count, 2)
         self.assertEqual(radarr.request.call_args_list[1].args[0], "/api/v3/release?movieId=15")
+
+    def test_recovery_excludes_prior_hash_and_returns_none_if_only_candidate(self):
+        attempt = {"release_id": "a" * 40,
+                   "snapshot": json.dumps({"identity_key": "movie:radarr:15",
+                                             "release_id": "a" * 40})}
+        movie = {"id": 15, "title": "Movie", "year": 2020}
+        old = {"identity_key": "movie:radarr:15", "title": "Old", "source_file_id": "2",
+               "source_size_bytes": 20, "release_id": "a" * 40, "release_title": "Old",
+               "release_size_bytes": 10, "indexer_id": "1"}
+        radarr = Mock()
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.side_effect = [movie, []]
+        radarr.request.return_value = response
+        with patch("movie_staging_executor.live_eligible", return_value=True), \
+             patch("movie_staging_executor.candidates", return_value=[(10, old)]):
+            self.assertIsNone(fresh_recovery_snapshot(
+                attempt, {"radarr": radarr, "jellyfin": Mock()}, {}, "/state.db", "user"))
 
 
 if __name__ == "__main__":

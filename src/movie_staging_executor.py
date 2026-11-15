@@ -69,7 +69,11 @@ def fresh_recovery_snapshot(attempt, clients, config, state_db, user_id):
     response = clients["radarr"].request(f"/api/v3/release?movieId={mid}", timeout=180)
     response.raise_for_status()
     found = candidates(movie, response.json(), config)
-    return found[0][1] if found else None
+    prior_hash = str(attempt.get("release_id") or "").lower()
+    for _, snapshot in found:
+        if snapshot["release_id"].lower() != prior_hash:
+            return snapshot
+    return None
 
 
 def stage_one(store, request, clients, config, state_db, user_id):

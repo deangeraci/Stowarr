@@ -11,6 +11,7 @@ from clients import QbitTorrentClient, ServiceClient
 class QbitClientTests(unittest.TestCase):
     def response(self, status=200, rows=None):
         response = Mock(status_code=status)
+        response.text = "Ok."
         response.json.return_value = rows or [{"hash": "a" * 40, "state": "downloading"}]
         return response
 
@@ -36,6 +37,19 @@ class QbitClientTests(unittest.TestCase):
         session.post.assert_called_once_with(
             "http://gluetun:8090/api/v2/auth/login",
             data={"username": "operator", "password": "secret"}, timeout=30)
+
+    @patch.dict(os.environ, {"QBIT_USER": "operator", "QBIT_PASS": "secret"}, clear=False)
+    def test_failed_200_login_does_not_authenticate(self):
+        session = Mock()
+        failed = self.response()
+        failed.text = "Fails."
+        session.post.return_value = failed
+        client = QbitTorrentClient("http://gluetun:8090", username_env="QBIT_USER",
+                                   password_env="QBIT_PASS", session=session)
+        with self.assertRaisesRegex(Exception, "login failed"):
+            client.state("a" * 40)
+        self.assertFalse(client.authenticated)
+        session.get.assert_not_called()
 
     def test_service_client_keeps_connectivity_test(self):
         client = ServiceClient("radarr", "http://radarr")
