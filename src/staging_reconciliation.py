@@ -89,7 +89,13 @@ def reconcile_attempts(store, radarr, qbit=None, page_size=100, recovery_factory
             status = "confirmed" if state == "imported" else ("failed" if state == "failed" else "uncertain")
         recovery = None
         if state == "missing" and recovery_factory is not None:
-            fresh_snapshot = recovery_factory(attempt)
+            recovery_attempt = dict(attempt)
+            try:
+                excluded = set(store.attempted_release_ids(rid))
+            except (AttributeError, TypeError):
+                excluded = {attempt["release_id"]}
+            recovery_attempt["excluded_release_ids"] = excluded
+            fresh_snapshot = recovery_factory(recovery_attempt)
             if fresh_snapshot is not None:
                 recovery = store.propose_recovery(rid, fresh_snapshot)
                 LOG.warning("staging_missing request_id=%s recovery_request_id=%s", rid, recovery)

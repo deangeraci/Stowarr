@@ -173,8 +173,11 @@ An ambiguous result is logged and left for the next reconciliation. A missing
 release re-runs live eligibility and Radarr candidate discovery, pins the
 currently best qualifying candidate, and creates exactly one new pending
 approval linked to the old attempt; an operator must review it before any new
-grab. The old approval remains consumed, and the stale release snapshot is
-never cloned.
+grab. Recovery approvals retain a durable parent link, and every release hash
+in that lineage is excluded, so a later recovery cannot cycle back to an older
+release (A → B cannot later select A). If no new qualifying release remains,
+the attempt stays missing/unresolved for later reconciliation. The old
+approval remains consumed, and stale release snapshots are never cloned.
 The executor never removes torrents, pauses/resumes them, deletes files, or
 automatically retries a grab.
 

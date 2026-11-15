@@ -69,6 +69,22 @@ class RecoveryTests(unittest.TestCase):
         reconcile_attempts(store, radarr, qbit, recovery_factory=factory)
         self.assertEqual(factory.call_count, 1)
 
+    def test_recovery_lineage_excludes_a_after_a_to_b(self):
+        store = Mock()
+        store.list_staging_attempts.return_value = [self.attempt("b-request", "b" * 40)]
+        store.attempted_release_ids.return_value = {"a" * 40, "b" * 40}
+        radarr = Mock()
+        radarr.request.return_value = self.response([self.record("grabbed", "b" * 40)])
+        qbit = Mock()
+        qbit.state.return_value = "removed"
+        factory = Mock(return_value=None)
+        result = reconcile_attempts(store, radarr, qbit, recovery_factory=factory)
+        self.assertEqual(result[0][1], "missing")
+        factory.assert_called_once()
+        self.assertEqual(factory.call_args.args[0]["excluded_release_ids"],
+                         {"a" * 40, "b" * 40})
+        store.propose_recovery.assert_not_called()
+
     def test_downloading_and_stalled_are_observable_without_mutation(self):
         store, qbit, result = self.run_case("downloading")
         self.assertEqual(result[0][1], "downloading")

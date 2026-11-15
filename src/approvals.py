@@ -47,7 +47,7 @@ class ApprovalStore:
                 id TEXT PRIMARY KEY, snapshot TEXT NOT NULL,
                 fingerprint TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
-                decided_at TEXT, actor TEXT);
+                decided_at TEXT, actor TEXT, recovery_parent_request_id TEXT);
               CREATE TABLE IF NOT EXISTS approval_events (
                 id INTEGER PRIMARY KEY, request_id TEXT NOT NULL,
                 event TEXT NOT NULL, actor TEXT NOT NULL, at TEXT NOT NULL);
@@ -66,6 +66,16 @@ class ApprovalStore:
 
 
         with self.connect() as db:
+            request_columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(approval_requests)")
+            }
+            if "recovery_parent_request_id" not in request_columns:
+                db.execute("ALTER TABLE approval_requests ADD COLUMN recovery_parent_request_id TEXT")
+            db.execute(
+                "CREATE INDEX IF NOT EXISTS approval_recovery_parent "
+                "ON approval_requests(recovery_parent_request_id)"
+            )
             columns = {
                 row["name"]
                 for row in db.execute("PRAGMA table_info(staging_attempts)")
@@ -242,15 +252,29 @@ class ApprovalStore:
             now = timestamp()
             expires = (datetime.now(timezone.utc) + timedelta(hours=72)).isoformat()
             db.execute(
-                "INSERT INTO approval_requests(id,snapshot,fingerprint,status,created_at,expires_at) "
-                "VALUES(?,?,?,?,?,?)", (new_id, canonical(snapshot), fingerprint(snapshot),
-                                          "pending", now, expires)
+                "INSERT INTO approval_requests(id,snapshot,fingerprint,status,created_at,expires_at,"
+                "recovery_parent_request_id) VALUES(?,?,?,?,?,?,?)",
+                (new_id, canonical(snapshot), fingerprint(snapshot), "pending", now, expires, rid)
             )
             db.execute("UPDATE staging_attempts SET recovery_request_id=? WHERE request_id=?",
                        (new_id, rid))
             db.execute("INSERT INTO approval_events(request_id,event,actor,at) VALUES(?,?,?,?)",
                        (new_id, "recovery_proposed", actor, now))
             return new_id
+
+    def attempted_release_ids(self, rid):
+        """Return all release hashes in this recovery lineage, read-only."""
+        with self.connect() as db:
+            rows = db.execute(
+                "WITH RECURSIVE lineage(request_id) AS ("
+                "SELECT ? UNION SELECT r.recovery_parent_request_id "
+                "FROM approval_requests r JOIN lineage l ON r.id=l.request_id "
+                "WHERE r.recovery_parent_request_id IS NOT NULL) "
+                "SELECT a.release_id FROM staging_attempts a "
+                "JOIN lineage l ON l.request_id=a.request_id",
+                (rid,),
+            ).fetchall()
+        return {str(row["release_id"]).lower() for row in rows}
 
 
 def main():

@@ -49,6 +49,26 @@ class FreshRecoveryCandidateTests(unittest.TestCase):
             self.assertIsNone(fresh_recovery_snapshot(
                 attempt, {"radarr": radarr, "jellyfin": Mock()}, {}, "/state.db", "user"))
 
+    def test_recovery_excludes_entire_lineage_and_selects_only_new_hash(self):
+        attempt = {"release_id": "b" * 40,
+                   "excluded_release_ids": {"a" * 40, "b" * 40},
+                   "snapshot": json.dumps({"identity_key": "movie:radarr:15"})}
+        radarr = Mock()
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.side_effect = [{"id": 15}, []]
+        radarr.request.return_value = response
+        a = dict(identity_key="movie:radarr:15", title="A", source_file_id="2",
+                 source_size_bytes=20, release_id="a" * 40, release_title="A",
+                 release_size_bytes=10, indexer_id="1")
+        b = dict(a, release_id="b" * 40, release_title="B")
+        c = dict(a, release_id="c" * 40, release_title="C")
+        with patch("movie_staging_executor.live_eligible", return_value=True), \
+             patch("movie_staging_executor.candidates", return_value=[(10, a), (9, b), (1, c)]):
+            result = fresh_recovery_snapshot(
+                attempt, {"radarr": radarr, "jellyfin": Mock()}, {}, "/state.db", "user")
+        self.assertEqual(result["release_id"], "c" * 40)
+
 
 if __name__ == "__main__":
     unittest.main()

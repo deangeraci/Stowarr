@@ -104,6 +104,14 @@ class StagingClaimTests(unittest.TestCase):
         self.assertEqual(row["id"], first)
         self.assertEqual(row["snapshot"]["release_id"], "b" * 40)
 
+    def test_recovery_lineage_contains_all_prior_hashes(self):
+        self.store.claim_staging(self.rid, self.snapshot)
+        b = dict(self.snapshot, release_id="b" * 40, release_title="Release B")
+        b_request = self.store.propose_recovery(self.rid, b)
+        self.store.decide(b_request, fingerprint(b), "approved", "test")
+        self.store.claim_staging(b_request, b)
+        self.assertEqual(self.store.attempted_release_ids(b_request), {"a" * 40, "b" * 40})
+
 
 if __name__ == "__main__":
     unittest.main()

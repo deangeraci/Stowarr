@@ -69,9 +69,10 @@ def fresh_recovery_snapshot(attempt, clients, config, state_db, user_id):
     response = clients["radarr"].request(f"/api/v3/release?movieId={mid}", timeout=180)
     response.raise_for_status()
     found = candidates(movie, response.json(), config)
-    prior_hash = str(attempt.get("release_id") or "").lower()
+    excluded = {str(value).lower() for value in attempt.get("excluded_release_ids", set())}
+    excluded.add(str(attempt.get("release_id") or "").lower())
     for _, snapshot in found:
-        if snapshot["release_id"].lower() != prior_hash:
+        if snapshot["release_id"].lower() not in excluded:
             return snapshot
     return None
 
