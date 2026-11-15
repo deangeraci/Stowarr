@@ -73,6 +73,9 @@ def main():
         raise SystemExit("Verification workers must be between 1 and 4")
     if args.max_bytes <= 0 or args.max_seconds <= 0:
         raise SystemExit("Verification limits must be positive")
+    # Authenticate once before parallel read-only probes; requests.Session and
+    # qBittorrent login cookies are not mutated concurrently by workers.
+    qbit._login_if_configured()
 
     def run(attempt):
         return attempt, verify_attempt(store, qbit, attempt, args.ffprobe, args.ffmpeg,
