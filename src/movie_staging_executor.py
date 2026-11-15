@@ -12,6 +12,7 @@ import requests
 import yaml
 
 from approvals import ApprovalStore
+from staging_reconciliation import reconcile_attempts
 from clients import ServiceClient
 from completion_config import configured_grace_days
 from movie_approvals import candidates, eligible_completion, provider_matches, read_live_item
@@ -74,10 +75,20 @@ def stage_one(store, request, clients, config, state_db, user_id):
                     and int(r.get("size") or 0) == snapshot["release_size_bytes"]), None)
         if raw is None:
             return "deferred: exact release payload changed"
-        store.consume(request["id"], snapshot, actor="staging-executor")
-        response = requests.post(clients["radarr"].base_url + "/api/v3/release",
-            headers=clients["radarr"]._headers(), json=raw, timeout=180)
-        response.raise_for_status()
+        client_id = int(os.environ.get("STOWARR_RADARR_DOWNLOAD_CLIENT_ID", "0"))
+        if client_id <= 0:
+            return "deferred: dedicated Radarr download client not configured"
+        raw["downloadClientId"] = client_id
+        store.claim_staging(request["id"], snapshot, actor="staging-executor")
+        store.update_staging(request["id"], "submitting")
+        try:
+            response = requests.post(clients["radarr"].base_url + "/api/v3/release",
+                headers=clients["radarr"]._headers(), json=raw, timeout=180)
+            response.raise_for_status()
+        except requests.RequestException:
+            store.update_staging(request["id"], "uncertain")
+            return "uncertain: Radarr submission requires reconciliation"
+        store.update_staging(request["id"], "confirmed")
         return "staged: " + snapshot["title"]
     except (ValueError, requests.RequestException, sqlite3.Error) as exc:
         return "failed: " + str(exc)
@@ -111,12 +122,22 @@ def main():
     if set(clients) != {"jellyfin", "radarr"}:
         raise SystemExit("Jellyfin and Radarr services must be configured")
     store = ApprovalStore(args.approval_db)
+    last_reconciliation = None
     while True:
+        now = time.monotonic()
+        if last_reconciliation is None or now - last_reconciliation >= 900:
+            last_reconciliation = now
+            try:
+                for rid, status in reconcile_attempts(store, clients["radarr"]):
+                    if status == "confirmed":
+                        print(f"{rid} | reconciled: Radarr grab confirmed", flush=True)
+            except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
+                print(f"Staging reconciliation failed: {type(exc).__name__}", flush=True)
+
         run_once(store, clients, config, args.state_db, user_id)
         if args.once:
             return
         time.sleep(args.interval_seconds)
-
 
 if __name__ == "__main__":
     main()

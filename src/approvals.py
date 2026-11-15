@@ -51,8 +51,35 @@ class ApprovalStore:
               CREATE TABLE IF NOT EXISTS approval_events (
                 id INTEGER PRIMARY KEY, request_id TEXT NOT NULL,
                 event TEXT NOT NULL, actor TEXT NOT NULL, at TEXT NOT NULL);
+              CREATE TABLE IF NOT EXISTS staging_attempts (
+                request_id TEXT PRIMARY KEY,
+                release_id TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'claimed'
+                    CHECK(status IN ('claimed','submitting','confirmed','uncertain','failed')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                last_error TEXT,
+                FOREIGN KEY(request_id) REFERENCES approval_requests(id)
+              );
               CREATE INDEX IF NOT EXISTS approval_fingerprint ON approval_requests(fingerprint);
             ''')
+
+
+        with self.connect() as db:
+            columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(staging_attempts)")
+            }
+            if "lifecycle_status" not in columns:
+                db.execute(
+                    "ALTER TABLE staging_attempts "
+                    "ADD COLUMN lifecycle_status TEXT"
+                )
+            if "last_observed_at" not in columns:
+                db.execute(
+                    "ALTER TABLE staging_attempts "
+                    "ADD COLUMN last_observed_at TEXT"
+                )
 
     @contextmanager
     def connect(self):
@@ -116,6 +143,62 @@ class ApprovalStore:
             if changed != 1:
                 raise ValueError("No current approval for this exact proposal")
             db.execute("INSERT INTO approval_events(request_id,event,actor,at) VALUES(?,?,?,?)", (rid, "consumed", actor, now))
+
+
+    def claim_staging(self, rid, current_snapshot, actor="staging-executor"):
+        """Atomically consume an approval and create its staging record."""
+        digest = fingerprint(current_snapshot)
+        now = timestamp()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            changed = db.execute(
+                "UPDATE approval_requests SET status='consumed' "
+                "WHERE id=? AND fingerprint=? AND status='approved' AND expires_at>?",
+                (rid, digest, now)
+            ).rowcount
+            if changed != 1:
+                raise ValueError("No current approval for this exact proposal")
+            db.execute(
+                "INSERT INTO staging_attempts "
+                "(request_id, release_id, status, created_at, updated_at) "
+                "VALUES (?, ?, 'claimed', ?, ?)",
+                (rid, current_snapshot["release_id"], now, now)
+            )
+            db.execute(
+                "INSERT INTO approval_events(request_id,event,actor,at) VALUES(?,?,?,?)",
+                (rid, "consumed", actor, now)
+            )
+
+
+    def update_staging(self, rid, status, error=None):
+        """Persist submission outcome without changing approval state."""
+        if status not in {"submitting", "confirmed", "uncertain", "failed"}:
+            raise ValueError("Invalid staging status")
+        now = timestamp()
+        with self.connect() as db:
+            changed = db.execute(
+                "UPDATE staging_attempts SET status=?, updated_at=?, last_error=? "
+                "WHERE request_id=?",
+                (status, now, error, rid)
+            ).rowcount
+            if changed != 1:
+                raise ValueError("Staging attempt not found")
+
+
+    def list_staging_attempts(self, statuses=None):
+        """Read persistent staging records for reconciliation."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT a.request_id, a.release_id, a.status, a.created_at, "
+                "a.updated_at, r.snapshot "
+                "FROM staging_attempts a "
+                "JOIN approval_requests r ON r.id=a.request_id "
+                "ORDER BY a.created_at"
+            ).fetchall()
+        result = [dict(row) for row in rows]
+        if statuses is not None:
+            result = [r for r in result if r["status"] in statuses]
+        return result
 
 
 def main():
