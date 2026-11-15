@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import argparse
+import json
+import logging
 import os
 import re
 import sqlite3
@@ -13,7 +15,7 @@ import yaml
 
 from approvals import ApprovalStore
 from staging_reconciliation import reconcile_attempts
-from clients import ServiceClient
+from clients import QbitTorrentClient, ServiceClient
 from completion_config import configured_grace_days
 from movie_approvals import candidates, eligible_completion, provider_matches, read_live_item
 
@@ -55,6 +57,26 @@ def live_eligible(clients, state_db, user_id, movie, delay):
     return len(matches) == 1
 
 
+def fresh_recovery_snapshot(attempt, clients, config, state_db, user_id):
+    """Re-run read-only eligibility and candidate discovery for recovery."""
+    old = json.loads(attempt["snapshot"])
+    mid = movie_id(old)
+    response = clients["radarr"].request(f"/api/v3/movie/{mid}", timeout=180)
+    response.raise_for_status()
+    movie = response.json()
+    if not live_eligible(clients, state_db, user_id, movie, configured_grace_days(config)):
+        return None
+    response = clients["radarr"].request(f"/api/v3/release?movieId={mid}", timeout=180)
+    response.raise_for_status()
+    found = candidates(movie, response.json(), config)
+    excluded = {str(value).lower() for value in attempt.get("excluded_release_ids", set())}
+    excluded.add(str(attempt.get("release_id") or "").lower())
+    for _, snapshot in found:
+        if snapshot["release_id"].lower() not in excluded:
+            return snapshot
+    return None
+
+
 def stage_one(store, request, clients, config, state_db, user_id):
     snapshot = request["snapshot"]
     try:
@@ -79,13 +101,21 @@ def stage_one(store, request, clients, config, state_db, user_id):
         if client_id <= 0:
             return "deferred: dedicated Radarr download client not configured"
         raw["downloadClientId"] = client_id
+        raw["category"] = os.environ.get("STOWARR_QBITTORRENT_CATEGORY", "stowarr")
         store.claim_staging(request["id"], snapshot, actor="staging-executor")
         store.update_staging(request["id"], "submitting")
         try:
             response = requests.post(clients["radarr"].base_url + "/api/v3/release",
                 headers=clients["radarr"]._headers(), json=raw, timeout=180)
             response.raise_for_status()
-        except requests.RequestException:
+        except requests.HTTPError as exc:
+            response = exc.response
+            if response is not None and 400 <= response.status_code < 500 and response.status_code not in {408, 429}:
+                store.update_staging(request["id"], "failed")
+                return "failed: Radarr rejected the exact release"
+            store.update_staging(request["id"], "uncertain")
+            return "uncertain: Radarr submission requires reconciliation"
+        except requests.RequestException as exc:
             store.update_staging(request["id"], "uncertain")
             return "uncertain: Radarr submission requires reconciliation"
         store.update_staging(request["id"], "confirmed")
@@ -103,6 +133,8 @@ def run_once(store, clients, config, state_db, user_id):
 
 
 def main():
+    logging.basicConfig(level=os.environ.get("STOWARR_LOG_LEVEL", "INFO"),
+                        format="%(asctime)s %(levelname)s %(name)s %(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", default="/app/config/config.yaml")
     parser.add_argument("--state-db", default="/app/data/media-optimizer.db")
@@ -122,15 +154,26 @@ def main():
     if set(clients) != {"jellyfin", "radarr"}:
         raise SystemExit("Jellyfin and Radarr services must be configured")
     store = ApprovalStore(args.approval_db)
+    qbit = QbitTorrentClient(
+        os.environ.get("STOWARR_QBITTORRENT_URL", "http://gluetun:8090"),
+        os.environ.get("STOWARR_QBITTORRENT_CATEGORY", "stowarr"),
+        os.environ.get("STOWARR_QBITTORRENT_USERNAME_ENV", "STOWARR_QBITTORRENT_USERNAME"),
+        os.environ.get("STOWARR_QBITTORRENT_PASSWORD_ENV", "STOWARR_QBITTORRENT_PASSWORD"),
+    )
+    def recovery_factory(attempt):
+        return fresh_recovery_snapshot(attempt, clients, config, args.state_db, user_id)
     last_reconciliation = None
     while True:
         now = time.monotonic()
         if last_reconciliation is None or now - last_reconciliation >= 900:
             last_reconciliation = now
             try:
-                for rid, status in reconcile_attempts(store, clients["radarr"]):
-                    if status == "confirmed":
-                        print(f"{rid} | reconciled: Radarr grab confirmed", flush=True)
+                for result in reconcile_attempts(store, clients["radarr"], qbit,
+                                                 recovery_factory=recovery_factory):
+                    rid, status, *recovery = result
+                    print(f"{rid} | reconciled: {status}" +
+                          (f"; fresh approval {recovery[0]}" if recovery and recovery[0] else ""),
+                          flush=True)
             except (requests.RequestException, ValueError, KeyError, TypeError) as exc:
                 print(f"Staging reconciliation failed: {type(exc).__name__}", flush=True)
 

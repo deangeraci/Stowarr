@@ -65,24 +65,62 @@ class ServiceClient:
             "sonarr": "/ping",
             "radarr": "/ping",
         }
-
-        path = paths[self.name]
-
         try:
-            response = self.request(path)
-
-            return ServiceResult(
-                name=self.name,
-                url=self.base_url,
-                ok=response.ok,
-                status_code=response.status_code,
-            )
-
+            response = self.request(paths[self.name])
+            return ServiceResult(self.name, self.base_url, response.ok,
+                                 response.status_code)
         except requests.RequestException as exc:
-            return ServiceResult(
-                name=self.name,
-                url=self.base_url,
-                ok=False,
-                status_code=None,
-                error=str(exc),
-            )
+            return ServiceResult(self.name, self.base_url, False, None, str(exc))
+
+
+class QbitTorrentClient:
+    """Read-only qBittorrent adapter; it intentionally has no mutation methods."""
+
+    def __init__(self, base_url, category="stowarr", username_env=None,
+                 password_env=None, session=None):
+        self.base_url = base_url.rstrip("/")
+        self.category = category
+        self.username_env = username_env
+        self.password_env = password_env
+        self.session = session or requests.Session()
+        self.authenticated = False
+
+    def _login_if_configured(self):
+        if self.authenticated or not (self.username_env and self.password_env):
+            return
+        username = os.environ.get(self.username_env)
+        password = os.environ.get(self.password_env)
+        if not username and not password:
+            return
+        if not username or not password:
+            raise requests.RequestException("qBittorrent credentials are not configured")
+        response = self.session.post(
+            self.base_url + "/api/v2/auth/login",
+            data={"username": username, "password": password}, timeout=30)
+        response.raise_for_status()
+        if str(response.text or "").strip().lower() not in {"ok", "ok."}:
+            raise requests.RequestException("qBittorrent login failed")
+        self.authenticated = True
+
+    def state(self, torrent_hash):
+        self._login_if_configured()
+        response = self.session.get(
+            self.base_url + "/api/v2/torrents/info",
+            params={"hashes": torrent_hash, "category": self.category},
+            timeout=30,
+        )
+        if (response.status_code in {401, 403} and self.username_env and self.password_env
+                and os.environ.get(self.username_env) and os.environ.get(self.password_env)):
+            self.authenticated = False
+            self._login_if_configured()
+            response = self.session.get(
+                self.base_url + "/api/v2/torrents/info",
+                params={"hashes": torrent_hash, "category": self.category}, timeout=30)
+        response.raise_for_status()
+        rows = response.json()
+        for row in rows:
+            if str(row.get("hash", "")).lower() == torrent_hash.lower():
+                # qBittorrent names are stable API values; callers only use
+                # this method to classify existence and progress.
+                return str(row.get("state", "")).strip()
+        return "removed"
