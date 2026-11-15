@@ -13,6 +13,8 @@ from pathlib import Path
 
 FIELDS = {"identity_key", "title", "source_file_id", "source_size_bytes",
           "release_id", "release_title", "release_size_bytes", "indexer_id"}
+WORKFLOW_VERSION = "direct-qbit-v1"
+LEGACY_WORKFLOW_VERSION = "radarr-grab-v0"
 
 
 def timestamp():
@@ -47,7 +49,8 @@ class ApprovalStore:
                 id TEXT PRIMARY KEY, snapshot TEXT NOT NULL,
                 fingerprint TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
                 created_at TEXT NOT NULL, expires_at TEXT NOT NULL,
-                decided_at TEXT, actor TEXT, recovery_parent_request_id TEXT);
+                decided_at TEXT, actor TEXT, recovery_parent_request_id TEXT,
+                workflow_version TEXT NOT NULL DEFAULT 'direct-qbit-v1');
               CREATE TABLE IF NOT EXISTS approval_events (
                 id INTEGER PRIMARY KEY, request_id TEXT NOT NULL,
                 event TEXT NOT NULL, actor TEXT NOT NULL, at TEXT NOT NULL);
@@ -59,6 +62,10 @@ class ApprovalStore:
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 last_error TEXT,
+                torrent_hash TEXT,
+                staging_category TEXT,
+                download_path TEXT,
+                verification_json TEXT,
                 FOREIGN KEY(request_id) REFERENCES approval_requests(id)
               );
               CREATE INDEX IF NOT EXISTS approval_fingerprint ON approval_requests(fingerprint);
@@ -66,6 +73,15 @@ class ApprovalStore:
 
 
         with self.connect() as db:
+            request_columns = {
+                row["name"]
+                for row in db.execute("PRAGMA table_info(approval_requests)")
+            }
+            if "workflow_version" not in request_columns:
+                db.execute(
+                    "ALTER TABLE approval_requests ADD COLUMN workflow_version "
+                    "TEXT NOT NULL DEFAULT 'radarr-grab-v0'"
+                )
             request_columns = {
                 row["name"]
                 for row in db.execute("PRAGMA table_info(approval_requests)")
@@ -92,6 +108,9 @@ class ApprovalStore:
                 )
             if "recovery_request_id" not in columns:
                 db.execute("ALTER TABLE staging_attempts ADD COLUMN recovery_request_id TEXT")
+            for name in ("torrent_hash", "staging_category", "download_path", "verification_json"):
+                if name not in columns:
+                    db.execute(f"ALTER TABLE staging_attempts ADD COLUMN {name} TEXT")
             # Consumed approvals created before staging_attempts existed are
             # retained as historical records so the October 8 backlog can be
             # reconciled without ever replaying the approval.
@@ -132,7 +151,7 @@ class ApprovalStore:
             if existing:
                 return existing["id"]
             rid = uuid.uuid4().hex
-            db.execute("INSERT INTO approval_requests(id,snapshot,fingerprint,created_at,expires_at) VALUES(?,?,?,?,?)", (rid, encoded, digest, now, expires))
+            db.execute("INSERT INTO approval_requests(id,snapshot,fingerprint,created_at,expires_at,workflow_version) VALUES(?,?,?,?,?,?)", (rid, encoded, digest, now, expires, WORKFLOW_VERSION))
             db.execute("INSERT INTO approval_events(request_id,event,actor,at) VALUES(?,?,?,?)", (rid, "proposed", "cli", now))
             return rid
 
@@ -186,6 +205,13 @@ class ApprovalStore:
             ).rowcount
             if changed != 1:
                 raise ValueError("No current approval for this exact proposal")
+            duplicate = db.execute(
+                "SELECT request_id FROM staging_attempts WHERE release_id=? "
+                "AND status NOT IN ('failed') AND request_id<>?",
+                (current_snapshot["release_id"], rid),
+            ).fetchone()
+            if duplicate:
+                raise ValueError("Release is already staged by another request")
             db.execute(
                 "INSERT INTO staging_attempts "
                 "(request_id, release_id, status, created_at, updated_at) "
@@ -199,7 +225,8 @@ class ApprovalStore:
 
 
     def update_staging(self, rid, status, error=None, lifecycle_status=None,
-                       observed_at=None):
+                       observed_at=None, torrent_hash=None, staging_category=None,
+                       download_path=None, verification_json=None):
         """Persist submission outcome without changing approval state."""
         if status not in {"submitting", "confirmed", "uncertain", "failed"}:
             raise ValueError("Invalid staging status")
@@ -208,9 +235,14 @@ class ApprovalStore:
             changed = db.execute(
                 "UPDATE staging_attempts SET status=?, updated_at=?, last_error=?, "
                 "lifecycle_status=COALESCE(?, lifecycle_status), "
-                "last_observed_at=COALESCE(?, last_observed_at) "
+                "last_observed_at=COALESCE(?, last_observed_at), "
+                "torrent_hash=COALESCE(?, torrent_hash), "
+                "staging_category=COALESCE(?, staging_category), "
+                "download_path=COALESCE(?, download_path), "
+                "verification_json=COALESCE(?, verification_json) "
                 "WHERE request_id=?",
-                (status, now, error, lifecycle_status, observed_at, rid)
+                (status, now, error, lifecycle_status, observed_at, torrent_hash,
+                 staging_category, download_path, verification_json, rid)
             ).rowcount
             if changed != 1:
                 raise ValueError("Staging attempt not found")
@@ -222,7 +254,8 @@ class ApprovalStore:
             rows = db.execute(
                 "SELECT a.request_id, a.release_id, a.status, a.created_at, "
                 "a.updated_at, a.lifecycle_status, a.last_observed_at, "
-                "a.recovery_request_id, r.snapshot "
+                "a.recovery_request_id, a.torrent_hash, a.staging_category, "
+                "a.download_path, a.verification_json, r.snapshot, r.workflow_version "
                 "FROM staging_attempts a "
                 "JOIN approval_requests r ON r.id=a.request_id "
                 "ORDER BY a.created_at"
@@ -231,6 +264,48 @@ class ApprovalStore:
         if statuses is not None:
             result = [r for r in result if r["status"] in statuses]
         return result
+
+    def pending_migration_preview(self):
+        """Return legacy pending/approved requests without changing them."""
+        with self.connect() as db:
+            rows = db.execute(
+                "SELECT id, status, created_at, expires_at, recovery_parent_request_id "
+                "FROM approval_requests WHERE workflow_version=? "
+                "AND status IN ('pending', 'approved') ORDER BY created_at",
+                (LEGACY_WORKFLOW_VERSION,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def migrate_pending_to_direct_qbit(self, actor="phase1-migration", authorized=False):
+        """Mark legacy pending/approved requests as the reviewed Phase 1 flow.
+
+        Existing requests keep their IDs, snapshots, decisions, and recovery
+        lineage. This only changes the executor contract and records an event.
+        It never consumes an approval or submits a download.
+        """
+        if not authorized:
+            raise PermissionError("explicit migration authorization is required")
+        if not actor or len(actor) > 128:
+            raise ValueError("migration actor is required")
+        now = timestamp()
+        with self.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            rows = db.execute(
+                "SELECT id FROM approval_requests WHERE workflow_version=? "
+                "AND status IN ('pending', 'approved')",
+                (LEGACY_WORKFLOW_VERSION,),
+            ).fetchall()
+            for row in rows:
+                db.execute(
+                    "UPDATE approval_requests SET workflow_version=? WHERE id=?",
+                    (WORKFLOW_VERSION, row["id"]),
+                )
+                db.execute(
+                    "INSERT INTO approval_events(request_id,event,actor,at) "
+                    "VALUES(?,?,?,?)",
+                    (row["id"], "phase1_migrated", actor, now),
+                )
+            return [row["id"] for row in rows]
 
     def propose_recovery(self, rid, snapshot, actor="staging-reconciler"):
         """Create one pending approval for a freshly revalidated candidate."""
@@ -253,8 +328,9 @@ class ApprovalStore:
             expires = (datetime.now(timezone.utc) + timedelta(hours=72)).isoformat()
             db.execute(
                 "INSERT INTO approval_requests(id,snapshot,fingerprint,status,created_at,expires_at,"
-                "recovery_parent_request_id) VALUES(?,?,?,?,?,?,?)",
-                (new_id, canonical(snapshot), fingerprint(snapshot), "pending", now, expires, rid)
+                "recovery_parent_request_id,workflow_version) VALUES(?,?,?,?,?,?,?,?)",
+                (new_id, canonical(snapshot), fingerprint(snapshot), "pending", now, expires, rid,
+                 WORKFLOW_VERSION)
             )
             db.execute("UPDATE staging_attempts SET recovery_request_id=? WHERE request_id=?",
                        (new_id, rid))
@@ -286,10 +362,22 @@ def main():
     sub.add_argument("--ttl-hours", type=int, default=72)
     sub.add_argument("--notify", action="store_true")
     subs.add_parser("list")
+    migration = subs.add_parser("migrate-phase1",
+                                help="review, then explicitly authorize legacy pending approvals")
+    migration.add_argument("--authorize", action="store_true")
+    migration.add_argument("--actor", default="operator")
     args = parser.parse_args()
     store = ApprovalStore(args.db)
     if args.command == "list":
         print(json.dumps(store.list(), indent=2))
+    elif args.command == "migrate-phase1":
+        if not args.authorize:
+            print(json.dumps(store.pending_migration_preview(), indent=2))
+            print("No changes made. Re-run with --authorize after review.")
+        else:
+            migrated = store.migrate_pending_to_direct_qbit(
+                actor=args.actor, authorized=True)
+            print(json.dumps({"migrated": migrated, "actor": args.actor}))
     else:
         with open(args.file, encoding="utf-8") as f:
             proposal = json.load(f)

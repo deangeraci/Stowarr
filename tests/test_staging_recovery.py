@@ -124,6 +124,48 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(result[0][1], "ambiguous")
         store.propose_recovery.assert_not_called()
 
+    def test_direct_qbit_restart_recovery_skips_radarr_import_history(self):
+        store = Mock()
+        attempt = self.attempt()
+        attempt.update({
+            "status": "confirmed", "lifecycle_status": "downloading",
+            "staging_category": "stowarr-replacement",
+            "torrent_hash": "a" * 40,
+            "download_path": "/data/replacements",
+        })
+        store.list_staging_attempts.return_value = [attempt]
+        radarr = Mock()
+        qbit = Mock()
+        qbit.info.return_value = {
+            "hash": "a" * 40, "state": "uploading", "progress": 1,
+            "amount_left": 0, "category": "stowarr-replacement",
+            "content_path": "/data/replacements/movie.mkv",
+        }
+        result = reconcile_attempts(store, radarr, qbit)
+        self.assertEqual(result[0][1], "complete_unverified")
+        radarr.request.assert_not_called()
+        store.update_staging.assert_called_once()
+        self.assertEqual(store.update_staging.call_args.kwargs["lifecycle_status"],
+                         "complete_unverified")
+
+    def test_uncertain_direct_submission_is_not_retried_when_hash_is_absent(self):
+        store = Mock()
+        attempt = self.attempt()
+        attempt.update({
+            "status": "uncertain", "lifecycle_status": "submitting",
+            "staging_category": "stowarr-replacement", "torrent_hash": "a" * 40,
+            "download_path": "/data/replacements",
+        })
+        store.list_staging_attempts.return_value = [attempt]
+        radarr = Mock()
+        qbit = Mock()
+        qbit.info.return_value = None
+        qbit.state.return_value = "removed"
+        factory = Mock()
+        result = reconcile_attempts(store, radarr, qbit, recovery_factory=factory)
+        self.assertEqual(result[0][1], "ambiguous")
+        factory.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,9 +1,10 @@
 # Stowarr staging approvals
 
 Optional private UI with Approve staging / Reject buttons. It stores decisions
-in `data/approvals.sqlite3`, separate from completion history. The optional
-staging service can submit an approved exact release to Radarr; importing,
-replacement, and deletion remain separate workflows.
+in `data/approvals.sqlite3`, separate from completion history. The staging
+service can acquire an approved exact release into an isolated qBittorrent
+category and path. Importing, replacement, and deletion remain separate
+workflows.
 
 ## Install
 
@@ -105,8 +106,8 @@ staging. The hash pins source file ID/size, release ID/title/size, indexer and
 media identity. Any changed field invalidates authorization. `consume` is an
 at-most-once claim, not download success. Reconcile errors before a new request.
 The optional staging service rechecks live completion, Played status, the current
-source file and exact release availability before sending an approved request to
-Radarr. It never imports, replaces, or deletes library media.
+source file and exact release availability before direct qBittorrent acquisition.
+It never imports, replaces, or deletes library media.
 
 Back up approvals with SQLite's backup API alongside completion state. Changing
 the password requires recreating the service. All request mutations require
@@ -141,32 +142,31 @@ those variables in the command's service environment before using it.
 Set `STOWARR_EXECUTOR_JELLYFIN_USER_ID` in `.env.approvals` to the eligible
 32-character Jellyfin user ID, then start `stowarr-staging` alongside the UI.
 It checks approved requests every minute and consumes one only after the same
-live eligibility and exact-release checks pass. The executor sends only the
-exact Radarr release payload, with download client ID configured by
-`STOWARR_RADARR_DOWNLOAD_CLIENT_ID` (the compose example currently uses `2`),
-and the dedicated `stowarr` category. The production compose path uses the
-read-only qBittorrent Web API at `http://gluetun:8090`; override it with
-`STOWARR_QBITTORRENT_URL` only when the deployment topology differs. If
-qBittorrent requires authentication, set the username/password in the private
-`.env.approvals` file; the client logs in for a session cookie and never logs
-or exposes those values. It never imports, replaces, moves, or deletes media
-and does not call any qBittorrent mutation endpoint.
+live eligibility and exact-release checks pass. Radarr client ID 2 remains the
+normal monitored client and category. Phase 1 uses the separate
+`STOWARR_REPLACEMENT_CATEGORY` and `STOWARR_REPLACEMENT_PATH` values for direct
+qBittorrent acquisition. If qBittorrent requires authentication, set the
+username/password in the private `.env.approvals` file; the client logs in for
+a session cookie and never logs or exposes those values. It never imports,
+replaces, moves, or deletes media and does not call a Radarr submission or
+import endpoint.
 
 ### Recovery lifecycle
 
 Every consumed approval has one durable staging attempt. The claim and attempt
 row are committed in one SQLite transaction, so a restart or concurrent worker
 cannot claim the approval twice. A submission timeout, 5xx, or 429 is recorded
-as `uncertain`; a deterministic Radarr 4xx is `failed`. Neither is retried.
+as `uncertain`; a deterministic qBittorrent 4xx is `failed`. Neither is retried.
 
-Reconciliation runs before processing new approvals and reads Radarr history and
-qBittorrent's read-only `torrents/info` endpoint. It records these observations:
+Reconciliation runs before processing new approvals. Legacy attempts may read
+Radarr history, while Phase 1 attempts read qBittorrent's read-only
+`torrents/info` endpoint in the isolated category. It records these observations:
 
-- `grabbed`: Radarr accepted the exact movie/hash;
-- `downloading` or `stalled`: the exact hash still exists in category `stowarr`;
-- `imported`: Radarr completed an import, without Stowarr touching library files;
-- `failed`: Radarr reported a failed download;
-- `missing`: Radarr had grabbed it but the exact categorized torrent is gone;
+- `grabbed`/`imported`: legacy Radarr history evidence;
+- `downloading` or `stalled`: the exact hash still exists in its recorded category;
+- `complete_unverified`: an isolated torrent is complete but awaits media verification;
+- `failed`: the service reported a failed download;
+- `missing`: the exact categorized torrent is gone;
 - `ambiguous`: evidence is incomplete or a service is unavailable.
 
 An ambiguous result is logged and left for the next reconciliation. A missing
@@ -180,6 +180,61 @@ the attempt stays missing/unresolved for later reconciliation. The old
 approval remains consumed, and stale release snapshots are never cloned.
 The executor never removes torrents, pauses/resumes them, deletes files, or
 automatically retries a grab.
+
+## Phase 1 isolated acquisition
+
+Phase 1 downloads approved replacement candidates directly through qBittorrent.
+It does not submit them to Radarr's `/api/v3/release` endpoint. Set
+`STOWARR_REPLACEMENT_CATEGORY` to a pre-created qBittorrent category that is
+different from Radarr's monitored `STOWARR_QBITTORRENT_CATEGORY`, and set
+`STOWARR_REPLACEMENT_PATH` to an absolute path visible identically to the
+qBittorrent and Stowarr containers. The path must be outside every Radarr root
+folder. The executor enumerates every enabled Radarr download client and rejects
+any client using the replacement category. It also requires qBittorrent's
+category `savePath` to resolve to the same staging path, resolves filesystem
+symlinks before overlap checks, and accepts `STOWARR_RADARR_ROOT_PATH_MAP` only
+as an explicit mapping for Radarr container paths that differ from Stowarr's.
+The executor fails closed before every submission when any root, mapping,
+category, save path, or shared path cannot be verified.
+
+The direct submission uses the exact release URL returned by the live Radarr
+release search only as a source for qBittorrent. It never sends the release
+back to Radarr, and it never calls an import, rename, delete, or replacement
+endpoint. The dedicated category and path keep Completed Download Handling
+from observing the replacement download. qBittorrent 5.2.x login responses
+with HTTP 204 and a `QBT_SID_<port>` cookie are supported alongside legacy
+HTTP 200 `Ok.` responses.
+
+Completed downloads remain in `complete_unverified` until the read-only
+`staging_verification.py` command confirms the qBittorrent hash/category/path,
+file size, ffprobe metadata, SHA-256 digest, and a full ffmpeg video decode.
+Verification only records a manifest. FFmpeg is restricted to one worker thread,
+each job has a bounded timeout and 16 GiB file-size ceiling, and the CLI caps
+concurrent verification jobs at four (`STOWARR_VERIFY_WORKERS`). Phase 1 has no
+media swap, deletion, quarantine cleanup, or Radarr quality-profile mutation.
+
+Run verification for the isolated staging service with:
+
+```sh
+docker compose -f compose.yaml -f compose.approvals.yaml exec -T stowarr-staging \
+  python /app/src/staging_verification.py
+```
+
+Existing pending or approved requests created by the pre-Phase-1 executor are
+not reinterpreted automatically. Review them first with:
+
+```sh
+docker compose -f compose.yaml -f compose.approvals.yaml run --rm -T \
+  --entrypoint python media-optimizer /app/src/approvals.py \
+  --db /app/data/approvals.sqlite3 migrate-phase1
+```
+
+Only after a separately authorized review should the operator repeat the command
+with `--authorize --actor NAME`. That explicit action marks the reviewed rows
+`direct-qbit-v1` and records a `phase1_migrated` audit event. Their request IDs,
+snapshots, decisions, and recovery lineage remain unchanged. Migration consumes
+no approval and submits no torrent. Until then, legacy pending/approved rows
+remain deferred.
 
 On startup, the schema migration backfills consumed approvals that predate the
 staging table as historical attempts. This is intentionally read-only and lets
