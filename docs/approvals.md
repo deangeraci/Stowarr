@@ -209,7 +209,7 @@ Completed downloads remain in `complete_unverified` until the read-only
 `staging_verification.py` command confirms the qBittorrent hash/category/path,
 file size, ffprobe metadata, SHA-256 digest, and a full ffmpeg video decode.
 Verification only records a manifest. FFmpeg is restricted to one worker thread,
-each job has a bounded timeout and 32 GiB file-size ceiling, and the CLI caps
+each job has a bounded timeout and 16 GiB file-size ceiling, and the CLI caps
 concurrent verification jobs at four (`STOWARR_VERIFY_WORKERS`). Phase 1 has no
 media swap, deletion, quarantine cleanup, or Radarr quality-profile mutation.
 
