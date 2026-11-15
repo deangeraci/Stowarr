@@ -17,13 +17,23 @@ python3 -m unittest discover -s tests -v
 echo
 echo "========== CONFIG SAFETY =========="
 
-if grep -Eq \
-  'allow_download:[[:space:]]*true|allow_import:[[:space:]]*true|allow_delete:[[:space:]]*true' \
-  config/config.yaml
-then
-    echo "FAIL: destructive safety gate enabled"
-    exit 1
+config=${1:-config/config.yaml}
+if [ "$#" -eq 0 ] && [ ! -e "$config" ]; then
+    config=config/config.example.yaml
 fi
+python3 - "$config" <<'PY'
+import sys
+import yaml
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        safety = yaml.safe_load(stream)["safety"]
+    if any(safety[gate] is not False for gate in
+           ("allow_download", "allow_import", "allow_delete")):
+        raise ValueError
+except (OSError, KeyError, TypeError, ValueError, yaml.YAMLError):
+    raise SystemExit("FAIL: config must be readable and all write gates must be false")
+PY
 
 echo "PASS: write gates disabled"
 
