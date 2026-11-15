@@ -11,6 +11,20 @@ services:
     ports:
       - "${STOWARR_APPROVAL_BIND:-127.0.0.1}:8787:8787"
     restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import http.client, sys;
+          conn = http.client.HTTPConnection("127.0.0.1", 8787, timeout=2);
+          conn.request("GET", "/");
+          sys.exit(conn.getresponse().status != 401)
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
     read_only: true
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
