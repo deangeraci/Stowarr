@@ -2,11 +2,7 @@ name: CI
 
 on:
   push:
-    branches:
-      - main
   pull_request:
-    branches:
-      - main
 
 permissions:
   contents: read
@@ -30,4 +26,4 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run validation
-        run: ./scripts/validate.sh
+        run: ./scripts/validate.sh config/config.example.yaml
