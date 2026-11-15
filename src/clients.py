@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass
 
 import requests
@@ -96,10 +97,26 @@ class QbitTorrentClient:
             raise requests.RequestException("qBittorrent credentials are not configured")
         response = self.session.post(
             self.base_url + "/api/v2/auth/login",
-            data={"username": username, "password": password}, timeout=30)
-        response.raise_for_status()
-        if str(response.text or "").strip().lower() not in {"ok", "ok."}:
+            data={"username": username, "password": password},
+            timeout=30, allow_redirects=False)
+        body = response.text.strip().lower()
+        login_ok = (
+            (response.status_code == 200 and body in {"ok", "ok."})
+            or (response.status_code == 204 and not body)
+        )
+        # Use the login response's cookies so a stale session cannot satisfy this check.
+        has_session_cookie = any(
+            cookie.value and re.fullmatch(r"SID|QBT_SID_[0-9]+", cookie.name)
+            for cookie in response.cookies
+        )
+        if not login_ok or not has_session_cookie:
             raise requests.RequestException("qBittorrent login failed")
+
+        version = self.session.get(
+            self.base_url + "/api/v2/app/version", timeout=30, allow_redirects=False)
+        if version.status_code != 200 or not re.fullmatch(
+                r"v?[0-9]+\.[0-9]+\.[0-9]+[A-Za-z0-9.+_-]*", version.text.strip()):
+            raise requests.RequestException("qBittorrent session verification failed")
         self.authenticated = True
 
     def state(self, torrent_hash):
